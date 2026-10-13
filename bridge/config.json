@@ -1,0 +1,32 @@
+{
+  "listen_host": "127.0.0.1",
+  "http_port": 9800,
+  "local_login_port": 4315,
+  "tls_enabled": true,
+  "tls_port": 443,
+  "tls_cert": "tls/certs/server.crt",
+  "tls_key": "tls/certs/server.key",
+  "kilo_base_url": "https://api.kilo.ai/api/gateway",
+  "kilo_api_key": "",
+  "kilo_api_key_env": "KILO_API_KEY",
+  "model": "nvidia/nemotron-3-super-120b-a12b:free",
+  "model_context_limit": 262144,
+  "max_tokens": 500000,
+  "temperature": 0.5,
+  "request_timeout_seconds": 90,
+  "requests_per_hour": 180,
+  "token_budget_per_window": 0,
+  "window_seconds": 3600,
+  "game_key": "player2-ai-npc-minecraft",
+  "characters": [
+    {
+      "id": "kilo",
+      "name": "Kilo",
+      "short_name": "KILO",
+      "greeting": "Hey there! I'm your companion on this server. What are we up to today?",
+      "description": "You are a helpful, concise Minecraft companion AI agent.",
+      "voice_ids": [],
+      "meta": {"skin_url": ""}
+    }
+  ]
+}
