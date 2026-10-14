@@ -34,6 +34,7 @@ node scripts/chat_path_probe.js <user> [seconds]   # prove a NORMAL chat message
 node scripts/mcmti_format_probe.js <user> [seconds] # prove the mcmti chat shapes work, incl. its prefix (rig up)
 node scripts/byname_gate_probe.js <user> [seconds]  # pin down the by-name gate: case, word boundaries, name vs short_name (rig up)
 node scripts/multitarget_probe.js <user> [seconds] # who answers: one named bot vs both named (rig up)
+node scripts/prefix_shape_probe.js <user> [seconds] # does mcmti's prefix break the by-name gate? (rig up)
 ```
 
 ## Architecture facts that change how you work
@@ -64,6 +65,23 @@ node scripts/multitarget_probe.js <user> [seconds] # who answers: one named bot 
   idle envelope; it then refills one token per 20 s. One NPC turn is usually
   several bridge calls (user message → command feedback → memory extraction), so
   an NPC can appear to "ignore" a command for ~20 s right after a restart.
+- **...but companion chatter no longer starves players.** With two companions
+  spawned, the 3-token burst used to be spent on a spawn greeting plus NPC-to-NPC
+  exchanges, after which the player's command *and* its command feedback were
+  both degraded — which reads as "the NPC ignored me". Admission is now
+  priority-aware: `conversation` and `command_feedback` (player-driven) may use
+  any remaining token, while companion-initiated kinds (`npc_dialogue`,
+  `greeting`, `event`, `memory_extraction`) must leave `reserve_tokens_for_players`
+  (default 2) behind. The total requests/hour is unchanged — only *who gets
+  shed* when the quota is tight. `unknown`/unresolvable kinds keep their old
+  behaviour exactly (the classifier's invariant). Set
+  `reserve_tokens_for_players: 0` to restore the old behaviour.
+
+**A design note worth keeping:** the background check is
+`tokens >= reserve + 1`, not `tokens > reserve`. The bucket refills continuously,
+so the count is never exactly at the reserve — it is always a hair above it — and
+a bare `>` lets every background call through. Two regression tests exist purely
+to catch that.
 - **Python 3.10+ stdlib only.** No pip dependencies — do not add requirements.
   Tests use `unittest`, not pytest.
 - **Config precedence for the key:** JSON `kilo_api_key` > env var named by

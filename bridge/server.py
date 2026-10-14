@@ -21,7 +21,7 @@ from p2k_bridge.catalog import ModelCatalog
 from p2k_bridge.config import BridgeConfig
 from p2k_bridge.kilo import KiloClient, KiloError
 from p2k_bridge.normalize import normalize_llm_content, set_model, to_openai_envelope
-from p2k_bridge.ratelimit import TokenBucket
+from p2k_bridge.ratelimit import BACKGROUND_KINDS, TokenBucket
 from p2k_bridge.routing import UNKNOWN, character_overrides, resolve_route
 from p2k_bridge.state import STATE
 
@@ -63,7 +63,7 @@ def init(
 ) -> BridgeConfig:
     global CFG, BUCKET, BUDGET, BUDGET_ENABLED, KILO, CONFIG_PATH, CATALOG
     CFG = cfg
-    BUCKET = TokenBucket(cfg.requests_per_hour)
+    BUCKET = TokenBucket(cfg.requests_per_hour, cfg.reserve_tokens_for_players)
     BUDGET_ENABLED = getattr(cfg, "token_budget_per_window", 0) > 0
     # A budget built with tokens_per_window=0 is tracking-only: try_reserve is
     # never called on it, commit() still records window/lifetime usage.
@@ -87,6 +87,21 @@ def roster() -> list[dict]:
     """The live character roster (hot-reloaded from characters.json)."""
     chars = STATE.characters
     return [c for c in chars if isinstance(c, dict)]
+
+
+def _is_background(route: Any) -> bool:
+    """True when a call is companion-initiated rather than player-driven.
+
+    NPC-to-NPC chatter, spawn greetings, system events and background memory
+    extraction are what the companions do on their own. When the request quota is
+    tight these are shed first, so they cannot starve a player's command.
+
+    Deliberately an allow-list of background kinds rather than "not a priority
+    kind": ``unknown`` and an unresolvable route therefore keep their old
+    behaviour exactly, which is the invariant the classifier documents.
+    """
+    kind = getattr(route, "kind", "") or ""
+    return kind in BACKGROUND_KINDS
 
 
 # Models we have already warned about, so a character pinned to a model that is
@@ -522,10 +537,17 @@ class BridgeHandler(BaseHTTPRequestHandler):
         route = _resolve_route_safe(messages)
         STATE.increment("chat_requests")
         STATE.increment("bytes_up", len(body))
-        if BUCKET is None or not BUCKET.try_acquire():
+        if BUCKET is None or not BUCKET.try_acquire(background=_is_background(route)):
             STATE.increment("rate_limited")
             cap = CFG.requests_per_hour if CFG is not None else 0
-            LOG.warning("rate limited (%s req/hour quota exhausted; degraded reply)", cap)
+            if _is_background(route):
+                LOG.warning(
+                    "companion-initiated call shed (%s req/hour; reserve held for "
+                    "players; degraded reply)",
+                    cap,
+                )
+            else:
+                LOG.warning("rate limited (%s req/hour quota exhausted; degraded reply)", cap)
             _record_chat("rate_limited", t0, 0, 0, 0, preview, route)
             self._send_json(to_openai_envelope({"reason": "", "command": "", "message": ""}))
             return
@@ -623,7 +645,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
         preview = f"{request.seconds:.1f}s audio from {request.player or request.player_uuid or '?'}"
         STATE.increment("stt_requests")
         STATE.increment("bytes_up", len(body))
-        if BUCKET is None or not BUCKET.try_acquire():
+        if BUCKET is None or not BUCKET.try_acquire(background=False):
+            # STT is a player speaking, so it is always priority: a companion
+            # chatter burst must not stop a player being heard.
             STATE.increment("stt_rate_limited")
             cap = CFG.requests_per_hour if CFG is not None else 0
             LOG.warning("stt rate limited (%s req/hour exhausted); utterance ignored", cap)

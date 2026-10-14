@@ -53,6 +53,12 @@ class BridgeConfig:
     window_seconds: float = 3600.0
     model_context_limit: int = 262144
     game_key: str = "player2-ai-npc-minecraft"
+    # Tokens held back from companion-initiated calls (NPC-to-NPC chatter, spawn
+    # greetings, background memory extraction) so they cannot drain the burst and
+    # shed a player's command. Player-driven kinds (conversation,
+    # command_feedback, stt) may always use any remaining token. The total
+    # requests-per-hour is unchanged; only who is shed changes. 0 disables it.
+    reserve_tokens_for_players: int = 2
     characters: list[dict] = field(default_factory=lambda: [copy.deepcopy(DEFAULT_CHARACTER)])
 
     # Speech-to-text (voice input for NPCs). The endpoint is model-agnostic; the

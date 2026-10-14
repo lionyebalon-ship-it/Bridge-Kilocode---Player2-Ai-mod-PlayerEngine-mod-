@@ -221,8 +221,11 @@ outcome. Results, on the rig:
 
 So the mod's by-name gate is a **substring** match, not a prefix match — the name
 can appear anywhere in the message, and mcmti's default `prefix` does not break
-it. The third row is the useful one: without the companion name the message is
-correctly ignored, so voice cannot accidentally trigger NPCs that weren't named.
+it. (Measured: the prefix-before-name shape takes the *multi-target* path, which
+the mod leaves unstripped — and that path still works, it simply also considers
+the other companion. The gate itself is unaffected.) The third row above is the
+useful one: without the companion name the message is correctly ignored, so
+voice cannot accidentally trigger NPCs that weren't named.
 
 ### How the gate actually matches (verified)
 
@@ -297,12 +300,24 @@ phonetically-spelled `short_name`** as the spoken handle — both are accepted, 
 "Kilo". Test the name out loud with your Whisper model before shipping it.
 
 **Run one companion for voice.** With two characters in the roster the
-companions talk to each other (`kind=npc_dialogue`), and that chatter was
-observed to **starve a player's turn**: a message with the companion name was
-queued but never got its own bridge call, because the NPC's turns were spent
-answering the other NPC. The same four messages worked perfectly with a single
-companion. For responsive voice, keep `bridge/characters.json` to one character;
-use multi-character rosters for demonstrating per-character models.
+companions talk to each other (`kind=npc_dialogue`), and that chatter used to
+drain the request quota the player needed: a measured run spent its 3-token
+burst on a spawn greeting, two NPC-to-NPC exchanges and one player turn, after
+which the player's next message and its command feedback were **both degraded to
+the idle envelope** — indistinguishable from the NPC ignoring the command.
+
+That is now fixed rather than merely documented. Admission to the request quota
+is priority-aware: player-driven calls (`conversation`, `command_feedback`, and
+`/v1/stt/transcribe`) may use any remaining token, while companion-initiated
+kinds (`npc_dialogue`, `greeting`, `event`, `memory_extraction`) must leave
+`reserve_tokens_for_players` (default 2) behind. The total requests per hour is
+unchanged — only *who gets shed* when the quota is tight changes. Set
+`reserve_tokens_for_players` to `0` in `bridge/config.json` to restore the old
+behaviour.
+
+Two companions still cost several calls per turn, so a single companion remains
+the most responsive option for voice; use multi-character rosters for
+demonstrating per-character models.
 
 ### Server-side voice (the other path)
 

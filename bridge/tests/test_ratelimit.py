@@ -115,5 +115,79 @@ class RobustnessTests(unittest.TestCase):
         self.assertGreaterEqual(sum(1 for s in successes if s), 1)
 
 
+class PriorityAdmissionTests(unittest.TestCase):
+    """Companion chatter must not be able to starve a player's command.
+
+    Regression for the observed two-companion failure: a spawn greeting, two
+    NPC-to-NPC exchanges and one player turn drained the 3-token burst, and the
+    player's next message plus its command feedback were both degraded to the
+    idle envelope -- indistinguishable from the NPC ignoring them.
+    """
+
+    def test_background_calls_leave_the_reserve(self):
+        bucket = TokenBucket(180)  # capacity 3, reserve 2 by default
+        self.assertEqual(bucket.reserve, 2.0)
+        # Background (companion-initiated) needs MORE than the reserve.
+        self.assertTrue(bucket.try_acquire(background=True))   # 3 -> 2
+        self.assertFalse(bucket.try_acquire(background=True))  # at the reserve
+
+    def test_player_calls_still_get_the_reserved_tokens(self):
+        bucket = TokenBucket(180)
+        bucket.try_acquire(background=True)  # 3 -> 2, now at the reserve
+        # Both remaining tokens are still available to a player.
+        self.assertTrue(bucket.try_acquire(background=False))  # 2 -> 1
+        self.assertTrue(bucket.try_acquire(background=False))  # 1 -> 0
+        self.assertFalse(bucket.try_acquire(background=False))  # genuinely empty
+
+    def test_player_calls_work_when_the_bucket_is_full(self):
+        bucket = TokenBucket(180)
+        self.assertTrue(bucket.try_acquire(background=False))
+        self.assertTrue(bucket.try_acquire(background=False))
+        self.assertTrue(bucket.try_acquire(background=False))
+
+    def test_the_reserve_never_locks_background_out_entirely(self):
+        # A capacity of 1 (a rate under 60/hr) must not make background calls
+        # impossible, or a single-companion server would stop working.
+        bucket = TokenBucket(1)
+        self.assertEqual(bucket.reserve, 0.0)
+        self.assertTrue(bucket.try_acquire(background=True))
+
+    def test_zero_reserve_reproduces_the_old_behaviour(self):
+        bucket = TokenBucket(180, reserve_tokens=0)
+        self.assertEqual(bucket.reserve, 0.0)
+        self.assertTrue(bucket.try_acquire(background=True))
+        self.assertTrue(bucket.try_acquire(background=True))
+        self.assertTrue(bucket.try_acquire(background=True))
+        self.assertFalse(bucket.try_acquire(background=True))
+
+    def test_reserve_is_capped_below_capacity(self):
+        # Asking for more reserve than the bucket can hold must not deadlock
+        # background traffic; the reserve is clamped to capacity - 1.
+        bucket = TokenBucket(180, reserve_tokens=99)
+        self.assertEqual(bucket.reserve, 2.0)
+        self.assertTrue(bucket.try_acquire(background=True))
+
+    def test_bad_reserve_values_fall_back_to_the_default(self):
+        for bogus in ("2", None, [], 2.5):
+            bucket = TokenBucket(180, reserve_tokens=bogus)
+            self.assertEqual(bucket.reserve, 2.0, bogus)
+
+    def test_total_rate_is_unchanged_by_the_reserve(self):
+        # Priority reorders WHO is shed; it must not increase the total admitted.
+        bucket = TokenBucket(180)
+        admitted = 0
+        for _ in range(20):
+            if bucket.try_acquire(background=False) or bucket.try_acquire(background=True):
+                admitted += 1
+        self.assertLessEqual(admitted, 3)
+
+    def test_default_positional_call_is_priority(self):
+        bucket = TokenBucket(180)
+        self.assertTrue(bucket.try_acquire())
+        self.assertTrue(bucket.try_acquire())
+        self.assertTrue(bucket.try_acquire())
+        self.assertFalse(bucket.try_acquire())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -275,6 +275,62 @@ class RoutingWiringTests(BridgeHarness):
         self.assertEqual(entries[0]["kind"], "unknown")
         self.assertEqual(entries[1]["status"], "ok")
 
+    def test_chatter_cannot_starve_a_players_command(self):
+        """The two-companion failure, reproduced at the HTTP layer.
+
+        Observed live: a spawn greeting, two NPC-to-NPC exchanges and one player
+        turn drained the 3-token burst, and the player's next message and its
+        command feedback were both degraded to the idle envelope -- which the
+        player experiences as the NPC ignoring them. Companion-initiated calls
+        must leave a reserve behind.
+        """
+        self._write_roster([{"id": "kilo", "name": "Kilo", "short_name": "KILO"}])
+        self.start_bridge()
+        original = server.KILO._request
+        server.KILO._request = (
+            lambda method, path, payload: {"choices": [{"message": {"content": "{}"}}]}
+        )
+        self.addCleanup(lambda: setattr(server.KILO, "_request", original))
+
+        def chat(kind_text):
+            return self.post_chat({"messages": self._messages(kind_text)})
+
+        # Companion-initiated traffic first: greeting, then two NPC exchanges.
+        for kind_text in (
+            "Info: Hey there! I'm your companion on this server.",
+            'Other AI Message: [KILO]: Kilo. What\'s the plan?',
+            'Other AI Message: [KILO]: Still working on it.',
+        ):
+            status, raw = chat(kind_text)
+            self.assertEqual(status, 200, kind_text)
+
+        # The player's command and its command feedback must still get through:
+        # these are player-driven and the reserve exists precisely for them.
+        status, raw = chat("User Message: [a]: Kilo, get me 3 oak logs")
+        self.assertEqual(status, 200)
+        self.assertNotEqual(
+            json.loads(raw)["choices"][0]["message"]["content"], "", "player command was shed"
+        )
+        status, raw = chat("Info: Command feedback: @get oak_log 3 finished running.")
+        self.assertEqual(status, 200)
+
+        stats = json.loads(self.request("GET", "/bridge/stats")[1])
+        self.assertLess(stats["rate_limited"], 6, stats)
+
+    def test_reserve_can_be_disabled(self):
+        self._write_roster([{"id": "kilo", "name": "Kilo", "short_name": "KILO"}])
+        self.start_bridge(reserve_tokens_for_players=0, requests_per_hour=1)
+        self.assertEqual(server.BUCKET.reserve, 0.0)
+        original = server.KILO._request
+        server.KILO._request = (
+            lambda method, path, payload: {"choices": [{"message": {"content": "{}"}}]}
+        )
+        self.addCleanup(lambda: setattr(server.KILO, "_request", original))
+        # With a capacity of 1 the reserve is clamped to 0 anyway, so background
+        # traffic must still be admitted -- a single low-rate server keeps working.
+        status, _ = self.post_chat({"messages": self._messages("Info: anything")})
+        self.assertEqual(status, 200)
+
     def test_kilo_error_reply_still_carries_route(self):
         self.start_bridge(kilo_behavior={"status": 500, "body": b"upstream boom"})
         status, raw = self.post_chat({"messages": self._messages("hello")})
