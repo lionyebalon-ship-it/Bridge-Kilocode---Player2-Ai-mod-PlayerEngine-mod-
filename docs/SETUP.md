@@ -247,6 +247,46 @@ So, precisely:
 - **Either field works.** `name` or `short_name`, in any position.
 - **No name means no reply.** Ordinary chat is ignored, not answered.
 
+### One bot or several: who answers
+
+Each named companion is a separate target. `CallByNameMentionRouter` parses the
+message into `ResolvedTargets`, so:
+
+| You say | Who answers |
+|---|---|
+| `Kilo, get me 3 oak logs` | Kilo only |
+| `Blaze, get me 3 oak logs` | Blaze only |
+| `Kilo and Blaze, get me 3 oak logs` | **both**, each with its own turn |
+| anything with no companion name | nobody |
+
+Verified from the mod's own queueing logs rather than inferred: a message naming
+one companion is queued to exactly that companion's conversation, and a message
+naming both is queued to both — the log shows the identical message text on both
+queues, and the name prefix is only stripped when a single companion is
+addressed. `node scripts/multitarget_probe.js <player>` replays the three cases.
+
+### Simple Voice Chat alongside this
+
+SVC is **not** part of this bridge and never talks to it. It can be installed
+independently so players hear each other while `mcmti` puts the transcript in
+chat for the NPCs — but they are two client mods contending for the same
+microphone. Both open it the same way: `javax.sound.sampled.AudioSystem.getLine()`
+with a `TargetDataLine` (`JavaxMicrophone` in SVC, `AudioRecorder` in mcmti).
+
+Whether they can coexist depends on the platform's audio layer, and it is **not**
+tested here:
+
+- **PulseAudio / PipeWire** (typical Linux desktop) multiplex capture, so both
+  should be able to open the device at once.
+- **Exclusive-mode devices** (Windows WASAPI exclusive, ALSA direct): whichever
+  mod opens first wins and the other fails — mcmti logs *"Failed to initialize
+  audio recorder"*, SVC logs *"Failed to open microphone ..., falling back to
+  default microphone"*, both from `LineUnavailableException`.
+
+If it fails, point them at different input devices in SVC's audio settings, or
+switch SVC to its OpenAL backend (`ALMicrophone`) so mcmti keeps the Java Sound
+device.
+
 **Naming a companion for voice.** Whisper transcribes *words*, not spelling, so a
 name must be pronounceable as a word to survive transcription. `Kilo`, `Blaze`,
 `Nova` and `Bob` are fine; `Xyl0ph`, `Kylara` or a made-up spelling will come out
