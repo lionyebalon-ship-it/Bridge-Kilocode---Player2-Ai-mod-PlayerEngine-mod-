@@ -32,6 +32,7 @@ bash scripts/run_order.sh <user> "<msg>"            # drive one NPC order via th
 node scripts/test_bot_framing.js                    # assert the 3-level user_message frame (no rig needed)
 node scripts/chat_path_probe.js <user> [seconds]   # prove a NORMAL chat message drives an NPC turn (rig up)
 node scripts/mcmti_format_probe.js <user> [seconds] # prove the mcmti chat shapes work, incl. its prefix (rig up)
+node scripts/byname_gate_probe.js <user> [seconds]  # pin down the by-name gate: case, word boundaries, name vs short_name (rig up)
 ```
 
 ## Architecture facts that change how you work

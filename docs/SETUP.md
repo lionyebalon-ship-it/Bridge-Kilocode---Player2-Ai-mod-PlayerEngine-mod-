@@ -224,6 +224,38 @@ can appear anywhere in the message, and mcmti's default `prefix` does not break
 it. The third row is the useful one: without the companion name the message is
 correctly ignored, so voice cannot accidentally trigger NPCs that weren't named.
 
+### How the gate actually matches (verified)
+
+`scripts/byname_gate_probe.js` pins the rules down. From a run where the
+companion was `name: "Nova"`, `short_name: "Nov"`:
+
+| Message | Triggered? |
+|---|---|
+| `hello nova please say hello` | ✅ via `name` |
+| `hello NOV please say hello` | ✅ via `short_name` |
+| `Nova` (the name alone) | ✅ |
+| `can you hear me nova` (name at the end) | ✅ |
+| `a kilometer is one thousand meters` (contains "kilo") | ❌ ignored |
+| `hello everyone, is anybody online tonight` | ❌ ignored |
+
+So, precisely:
+
+- **Case-insensitive.** Whisper emits sentence case (`kilo, …`), and that matches.
+  This is why voice works even though the roster stores `Kilo`/`KILO`.
+- **Word-bounded.** `kilometer` does not contain `kilo` as far as the gate is
+  concerned, so unrelated chat cannot trigger a companion by accident.
+- **Either field works.** `name` or `short_name`, in any position.
+- **No name means no reply.** Ordinary chat is ignored, not answered.
+
+**Naming a companion for voice.** Whisper transcribes *words*, not spelling, so a
+name must be pronounceable as a word to survive transcription. `Kilo`, `Blaze`,
+`Nova` and `Bob` are fine; `Xyl0ph`, `Kylara` or a made-up spelling will come out
+as whatever word sounds nearest and the gate will miss it. The practical answer is
+to give the companion a distinctive `name` for display and a **simple
+phonetically-spelled `short_name`** as the spoken handle — both are accepted, so
+`name: "Kilomanjaro the Wise"` with `short_name: "Kilo"` still answers to
+"Kilo". Test the name out loud with your Whisper model before shipping it.
+
 **Run one companion for voice.** With two characters in the roster the
 companions talk to each other (`kind=npc_dialogue`), and that chatter was
 observed to **starve a player's turn**: a message with the companion name was
@@ -240,6 +272,19 @@ audio here, and inject the returned transcript. The mods themselves cannot
 capture audio — PlayerEngine has no microphone code at all (no `TargetDataLine`
 anywhere in the jar) and its own `/v1/stt/*` endpoints carry no audio, which is
 why the addon is required.
+
+### There is no NPC voice output
+
+`/v1/tts/speak` is a no-op stub, and the mods' own TTS path is broken on a
+dedicated server: `TTSManager` → `Player2APIService.textToSpeech` tries to send a
+`playerengine:stream_tts` payload, and NeoForge rejects it with *"Payload
+playerengine:stream_tts may not be sent to the client!"* — it is registered in
+the wrong direction. That is mod-side and the mods are never modified, so NPCs
+**reply in text**. Simple Voice Chat is **not** wired into this bridge either; it
+was evaluated as a capture path for the server-side voice option above and no
+code was written for it. The gateway does have 4 audio-output models (all paid)
+that could provide speech, but a replayed TTS path would still have to route
+around that payload bug, so it is out of scope here.
 
 It is **dormant**, because no free gateway model can actually transcribe:
 
