@@ -9,6 +9,10 @@ override.
 
 ## The roster file: `bridge/characters.json`
 
+A complete, copy-pasteable example (one global-model character and two with
+overrides, each exercising a different model) is in
+**`bridge/characters.example.json`**. The structure below is the same file:
+
 ```json
 {
   "characters": [

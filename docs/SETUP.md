@@ -24,6 +24,16 @@ bash bootstrap.sh
 
 It regenerates TLS certs if missing, creates `.env` from `.env.example` if missing (with a WARNING to paste `KILO_API_KEY` if it is still the placeholder), imports the CA into the system trust store (best-effort, root) and the system JVM (when keytool exists), checks the `/etc/hosts` entry, and checks python3. It ends with `bootstrap complete / N items need attention`. Then restart the bridge. Note: if the machine sits behind a TLS-intercepting proxy, that proxy's CA must also be in the system store for the bridge to reach api.kilo.ai.
 
+If the bridge logs `model catalog unavailable (network error: ... CERTIFICATE_VERIFY_FAILED ... self-signed certificate in chain)` at startup, that is exactly this problem — and it is worth fixing rather than ignoring, because without the catalog the bridge cannot read per-model context windows or validate a character's model, so it falls back to the global limits. Fix it with:
+
+```bash
+sudo cp /etc/cloudflare/certs/*.crt /usr/local/share/ca-certificates/
+sudo update-ca-certificates
+python3 bridge/run.py --check      # must print "kilo gateway models: N ids returned"
+```
+
+The bridge still starts and still serves chat without the catalog (it degrades to the configured limits, and every per-model lookup falls back to the global value) — it is a warning, not a failure.
+
 ## Step 1 — Generate TLS certificates
 ```bash
 bash tls/gen_certs.sh
