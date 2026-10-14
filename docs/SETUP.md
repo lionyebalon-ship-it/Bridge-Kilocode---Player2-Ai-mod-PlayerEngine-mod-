@@ -176,14 +176,19 @@ consumed by the by-name gate, so `Kilo, please say hello to me` arrives as
 
 ### Setup
 
-Put these three jars in the **player's** `.minecraft/mods/` folder (the client,
+Put these **two** jars in the **player's** `.minecraft/mods/` folder (the client,
 not the server):
 
 | Mod | File | Why |
 |---|---|---|
-| Microphone Text Input | `mcmti-2.2.1+1.21-neoforge.jar` | The speech mod. NeoForge, 1.21.1, MIT, client-side only. |
-| MidnightLib | `midnightlib-neoforge-1.9.3+1.21.1.jar` | Required dependency (its config GUI). |
-| Architectury API | `architectury-neoforge-13.0.11-neoforge.jar` | Required dependency. |
+| Microphone Text Input | `mcmti-2.2.1+1.21-neoforge.jar` | The speech mod. NeoForge, 1.21.1, MIT, client-side only. **The Whisper engine (`whisper-jni`) is already embedded inside it** via jarjar, so there is nothing else to install for transcription itself. |
+| MidnightLib | `midnightlib-neoforge-1.9.3+1.21.1.jar` | Its only external dependency (the config GUI). |
+
+Verified from the jar itself: its `neoforge.mods.toml` declares
+`neoforge [21,)` + `minecraft [1.21,)` + `midnightlib [1.0,)`, all with
+`side = "CLIENT"`, and `META-INF/jarjar/metadata.json` embeds
+`io.github.jaffe2718:whisper-jni:[1.0.1,)`. **Architectury is not needed on
+NeoForge** — it is a dependency of the Fabric build only.
 
 Then download a **GGML Whisper model** from
 [huggingface.co/ggerganov/whisper.cpp](https://huggingface.co/ggerganov/whisper.cpp/tree/main)
