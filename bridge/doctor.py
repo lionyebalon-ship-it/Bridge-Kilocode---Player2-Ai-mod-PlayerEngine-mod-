@@ -42,6 +42,11 @@ if str(BRIDGE_DIR) not in sys.path:
 
 from p2k_bridge.config import _parse_env_file, load_config  # noqa: E402
 
+try:  # the server module owns roster resolution (characters.json hot reload)
+    import server  # noqa: E402
+except ImportError:  # pragma: no cover - only when run from an unusual layout
+    server = None
+
 TARGET_HOSTNAME = "api.player2.game"
 LOOPBACK_IP = "127.0.0.1"
 JAVA_CERT_ALIAS = "p2k-bridge-ca"
@@ -779,7 +784,13 @@ def run_all(cfg, *, environ: Optional[dict] = None, now: Optional[datetime] = No
     api_key = (getattr(cfg, "kilo_api_key", "") or "").strip()
     model = getattr(cfg, "model", "")
     gateway_url = (getattr(cfg, "kilo_base_url", "") or "").rstrip("/") + "/models"
-    roster_models = _roster_models(cfg)
+    # The roster that characters.json actually serves, which is also where
+    # per-character models live -- cfg.characters would check a roster that is
+    # not in use once the file exists.
+    if server is not None:
+        roster_models = _roster_models(server.load_characters(cfg))
+    else:  # pragma: no cover - defensive
+        roster_models = _roster_models(getattr(cfg, "characters", []) or [])
 
     results: list[Check] = []
     results.append(check_python_version(sys.version_info))
@@ -797,13 +808,18 @@ def run_all(cfg, *, environ: Optional[dict] = None, now: Optional[datetime] = No
     return results
 
 
-def _roster_models(cfg) -> list[str]:
-    """Distinct models referenced by the roster, the global model first."""
+def _roster_models(characters) -> list[str]:
+    """Distinct models named by roster entries, in order.
+
+    Only per-character overrides are returned: the global model is already
+    validated by check #9, and including it here would make the "no overrides"
+    skip state unreachable.
+    """
     ordered: list[str] = []
-    for model_id in [getattr(cfg, "model", "") or ""] + [
-        character.get("model") for character in getattr(cfg, "characters", []) or []
-        if isinstance(character, dict)
-    ]:
+    for character in characters or []:
+        if not isinstance(character, dict):
+            continue
+        model_id = character.get("model")
         if isinstance(model_id, str) and model_id.strip() and model_id.strip() not in ordered:
             ordered.append(model_id.strip())
     return ordered

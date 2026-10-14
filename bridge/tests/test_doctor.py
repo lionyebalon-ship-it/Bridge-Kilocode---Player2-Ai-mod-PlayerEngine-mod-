@@ -532,6 +532,60 @@ class CheckGatewayTests(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# 12. roster models — must look at the SERVED roster, not cfg.characters
+# --------------------------------------------------------------------------- #
+class CheckRosterModelsTests(unittest.TestCase):
+    URL = "https://api.kilo.ai/api/gateway/models"
+
+    def test_character_models_are_validated(self):
+        # Per-character models live in characters.json, which shadows the
+        # "characters" array in config.json. Validating cfg.characters would
+        # check a roster that is not in use.
+        getter = _ok_getter({"data": [{"id": "pinned-model-1"}, {"id": "blaze-model"}]})
+        chars = [
+            {"id": "kilo", "name": "Kilo", "short_name": "KILO"},
+            {"id": "blaze", "name": "Blaze", "short_name": "BLAZE",
+             "model": "blaze-model"},
+        ]
+        chk = doctor.check_roster_models(
+            self.URL, doctor._roster_models(chars), getter=getter
+        )
+        self.assertEqual(chk.status, doctor.STATUS_PASS)
+        self.assertIn("all 1 roster model(s)", chk.detail)
+
+    def test_missing_character_model_warns_and_names_it(self):
+        getter = _ok_getter({"data": [{"id": "pinned-model-1"}]})
+        chars = [{"id": "blaze", "name": "Blaze", "model": "gone/model:free"}]
+        chk = doctor.check_roster_models(
+            self.URL, doctor._roster_models(chars), getter=getter
+        )
+        self.assertEqual(chk.status, doctor.STATUS_WARN)
+        self.assertIn("gone/model:free", chk.detail)
+        self.assertTrue(chk.fix)
+
+    def test_catalog_unavailable_skips_rather_than_fails(self):
+        getter = lambda u, **k: doctor.HttpResult(None, None, "", "URLError", "unreachable")
+        chk = doctor.check_roster_models(self.URL, ["some-model"], getter=getter)
+        self.assertEqual(chk.status, doctor.STATUS_SKIP)
+
+    def test_no_character_overrides_skips(self):
+        # The global model is already covered by check #9.
+        chars = [{"id": "kilo", "name": "Kilo"}]
+        chk = doctor.check_roster_models(self.URL, doctor._roster_models(chars))
+        self.assertEqual(chk.status, doctor.STATUS_SKIP)
+
+    def test_the_injected_getter_is_called_not_the_network(self):
+        called = []
+
+        def getter(url, timeout=None, headers=None):
+            called.append(url)
+            return doctor.HttpResult(200, {"data": []}, "{}", None, None)
+
+        doctor.check_roster_models(self.URL, ["some-model"], getter=getter)
+        self.assertEqual(called, [self.URL])
+
+
+# --------------------------------------------------------------------------- #
 # 9. end-to-end chat + envelope validation
 # --------------------------------------------------------------------------- #
 class CheckChatTests(unittest.TestCase):

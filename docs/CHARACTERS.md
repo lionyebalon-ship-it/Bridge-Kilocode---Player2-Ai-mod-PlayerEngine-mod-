@@ -19,14 +19,30 @@ override.
       "greeting": "Hey there! I'm your companion on this server. What are we up to today?",
       "description": "You are a helpful, concise Minecraft companion AI agent.",
       "voice_ids": [],
+      "meta": { "skin_url": "" }
+    },
+    {
+      "id": "blaze",
+      "name": "Blaze",
+      "short_name": "BLAZE",
+      "greeting": "Fire's burning, boss. I'm here.",
+      "description": "You are a fearless, aggressive NPC who speaks in short, punchy sentences.",
+      "voice_ids": [],
       "meta": { "skin_url": "" },
-      "model": "nvidia/nemotron-3.5-lightning:free",
+      "model": "nvidia/nemotron-3-ultra-550b-a55b:free",
       "temperature": 0.9,
-      "max_tokens": 4096
+      "max_tokens": 2048
     }
   ]
 }
 ```
+
+This is the shipped roster: `kilo` uses the global model, and `blaze` is the
+worked example of a character running its own brain. With both spawned they
+visibly differ — Blaze answers the same "get me 3 oak logs" with
+*"\*Blaze cracks his knuckles\* Get them yourself. I'm not your errand boy."*
+while Kilo answers *"Sure thing! I'll gather three oak logs for you right
+away."*
 
 | Field | Meaning |
 |---|---|
@@ -77,6 +93,28 @@ always apply to 100% of its calls.
 
 Model choice is visible per call in the bridge log and in
 `GET /bridge/stats` → `recent_requests[]` (`kind`, `character_id`, `model`).
+
+## Running more than one companion
+
+Companions talk to each other: when two are spawned, each one's messages
+generate another call for the other (`kind=npc_dialogue`). A single player
+order then costs **8–12 bridge calls instead of ~5**, which matters because
+the bridge caps at `requests_per_hour` (default 180) and a freshly started
+bridge only has the burst capacity. Both situations were measured on the rig:
+one E2E order with a single companion completed cleanly, and with two
+companions it still passed `ALL CHECKS` but a `npc_dialogue` call was
+rate-limited mid-turn.
+
+If NPCs start ignoring commands shortly after a restart, this is usually why —
+the quota is being spent on NPC-to-NPC chatter before your own order reaches
+the model. Raise `requests_per_hour`, wait ~20 s per token, or dismiss one
+companion.
+
+Note also that a companion **persists in the world** once spawned. Removing an
+entry from this roster does not unspawn the NPC or stop it talking: during one
+test the two-character roster was reverted to a single character, yet the
+second companion kept replying in the world and kept burning requests. Dismiss
+it in game, not just from the file.
 
 
 ## Managing the roster (CLI)

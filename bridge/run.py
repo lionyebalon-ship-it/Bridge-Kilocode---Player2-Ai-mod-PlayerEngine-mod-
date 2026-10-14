@@ -70,8 +70,10 @@ def run_check(config_path: Path) -> int:
         print("nemotron ids: none listed")
     # Every model referenced by the roster must exist too: a character pinned to
     # a model that has left the catalog would silently fall back to the global
-    # model for that NPC only.
-    roster_models = _roster_models(cfg)
+    # model for that NPC only. The roster is the one characters.json serves,
+    # which is also where per-character models live -- reading cfg.characters
+    # here would validate a roster that is not actually in use.
+    roster_models = _roster_models(server.load_characters(cfg), getattr(cfg, "model", ""))
     if roster_models:
         print()
         print("roster models:")
@@ -92,13 +94,13 @@ def run_check(config_path: Path) -> int:
     return 1
 
 
-def _roster_models(cfg) -> list[str]:
-    """Distinct model ids named by roster entries (global model first)."""
+def _roster_models(characters, global_model: str = "") -> list[str]:
+    """Distinct model ids used by a roster, the global model first."""
     ordered: list[str] = []
-    for model_id in [getattr(cfg, "model", "") or ""] + [
-        c.get("model") for c in getattr(cfg, "characters", []) or [] if isinstance(c, dict)
+    for model_id in [global_model or ""] + [
+        c.get("model") for c in characters or [] if isinstance(c, dict)
     ]:
-        if isinstance(model_id, str) and model_id.strip() and model_id not in ordered:
+        if isinstance(model_id, str) and model_id.strip() and model_id.strip() not in ordered:
             ordered.append(model_id.strip())
     return ordered
 
