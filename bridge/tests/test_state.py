@@ -59,6 +59,9 @@ class RecordRequestTests(unittest.TestCase):
                     "completion_tokens",
                     "total_tokens",
                     "preview",
+                    "kind",
+                    "character_id",
+                    "model",
                 ]
             ),
         )

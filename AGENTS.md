@@ -41,9 +41,14 @@ node scripts/test_bot_framing.js                    # assert the 3-level user_me
   so the NPC silently idles instead of breaking its turn. Don't "fix" this by
   propagating errors.
 - **Model math:** `max_tokens: 500000` is requested but clamped per call to
-  `model_context_limit (262144) − input − 1024`, floor 256 (`kilo.py:compute_max_tokens`).
+  `context_limit − input − 1024`, floor 256 (`kilo.py:compute_max_tokens`).
   Exceeding the context window is intentional; the clamp makes it safe.
-  `model_context_limit: 0` disables clamping.
+  `model_context_limit: 0` disables clamping. **The limit now comes from the
+  gateway catalog per requested model** (`p2k_bridge.catalog`), not just from this
+  global value: the global is the fallback when the catalog is unavailable or has
+  no entry. `compute_max_tokens` also honours an optional
+  `max_completion_tokens` cap, because some models publish a large context but a
+  much smaller completion window.
 - **Token budget is intentionally disabled** (`token_budget_per_window: 0` =
   tracking only). Positive values re-enable reserve→reconcile→refund. Don't
   change the default without being asked.
@@ -80,6 +85,26 @@ node scripts/test_bot_framing.js                    # assert the 3-level user_me
   `run_order.sh` discover the bridge's stdout path through `/proc`, so start the
   bridge with a log file (`python3 bridge/run.py ... > bridge.log 2>&1`) or the
   `bridge_ok_call` check silently evaluates false.
+- **Per-call routing.** `bridge/p2k_bridge/routing.py` classifies each chat call
+  into `conversation` / `command_feedback` / `greeting` / `event` /
+  `npc_dialogue` / `memory_extraction` / `unknown` and resolves a `Route` (model,
+  temperature, max_tokens, context limits) from the identified character, falling
+  back to the global `BridgeConfig` values. The classifier is **heuristic and
+  payload-driven**: the mod sends both bare text and a `{"userMessage": ...}` JSON
+  wrapper, and the shapes do not correlate with the kind, so `extract_payload_text`
+  normalises both before prefix matching. `unknown` (or any exception) means
+  "global route, same as before". Classification changes **no functional behaviour
+  today** — it is observability plus a seam for a future config-driven spend policy
+  (the unused `routing_rules` key). Background calls still always hit the gateway.
+  A call whose system prompt does not name a character is attributed to nobody
+  (`char=-`) and uses the global model.
+- **Character overrides live in `bridge/characters.json`.** The roster file takes
+  precedence over the `characters` array in `bridge/config.json`, so overrides
+  placed in the config are ignored once the file exists — the bridge logs a
+  WARNING naming the character and the ignored values. Context windows come from
+  the gateway catalog (`p2k_bridge.catalog`), never from config; a model that has
+  left the catalog makes only that character fall back to the global model, once
+  per model, never fatally.
 
 ## Mod endpoints the bridge must serve
 

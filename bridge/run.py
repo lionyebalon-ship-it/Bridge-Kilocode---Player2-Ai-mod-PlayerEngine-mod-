@@ -10,6 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import server
+from p2k_bridge.catalog import ModelCatalog
 from p2k_bridge.config import load_config
 from p2k_bridge.kilo import KiloClient, KiloError
 
@@ -67,11 +68,53 @@ def run_check(config_path: Path) -> int:
         print("nemotron ids: " + ", ".join(nemotron[:5]))
     else:
         print("nemotron ids: none listed")
+    # Every model referenced by the roster must exist too: a character pinned to
+    # a model that has left the catalog would silently fall back to the global
+    # model for that NPC only.
+    roster_models = _roster_models(cfg)
+    if roster_models:
+        print()
+        print("roster models:")
+        for model_id in roster_models:
+            ok = model_id in ids
+            print(f"  {'PRESENT' if ok else 'MISSING'}: {model_id}")
+        missing = [m for m in roster_models if m not in ids]
+        if missing:
+            print(
+                "FAIL: roster model(s) not in the catalog: " + ", ".join(missing),
+            )
+            return 1
+        print(f"PASS: all {len(roster_models)} roster model(s) available")
     if present:
         print("PASS: target model available")
         return 0
     print(f"FAIL: {TARGET_MODEL} not found in the gateway catalog")
     return 1
+
+
+def _roster_models(cfg) -> list[str]:
+    """Distinct model ids named by roster entries (global model first)."""
+    ordered: list[str] = []
+    for model_id in [getattr(cfg, "model", "") or ""] + [
+        c.get("model") for c in getattr(cfg, "characters", []) or [] if isinstance(c, dict)
+    ]:
+        if isinstance(model_id, str) and model_id.strip() and model_id not in ordered:
+            ordered.append(model_id.strip())
+    return ordered
+
+
+def _fetch_catalog(cfg) -> "ModelCatalog":
+    """Best-effort catalog fetch. Never raises: an empty catalog degrades every
+    per-model lookup to the configured globals."""
+    client = KiloClient(cfg)
+    try:
+        return ModelCatalog.from_payload(client.models())
+    except (KiloError, OSError, ValueError) as exc:
+        LOG.warning("model catalog unavailable (%s); using configured model limits", exc)
+        return ModelCatalog()
+    except Exception as exc:  # pragma: no cover - defensive
+        LOG.warning("model catalog fetch failed unexpectedly (%s); using configured limits", exc)
+        return ModelCatalog()
 
 
 def _banner(cfg, servers) -> None:
@@ -90,13 +133,37 @@ def _banner(cfg, servers) -> None:
         f"  quota      : {cfg.requests_per_hour} requests/hour (local token bucket)",
         f"  kilo key   : {'configured' if key_configured else 'not configured (free tier)'}",
     ]
+    # The *served* roster (characters.json) is what routing actually sees, so the
+    # banner must describe it rather than config.json's characters array.
+    roster_lines = _banner_roster(server.STATE.characters)
+    if roster_lines:
+        lines.extend(["  roster     :"] + [f"    {line}" for line in roster_lines])
     print("\n".join(lines), flush=True)
+
+
+def _banner_roster(characters) -> list[str]:
+    """One line per character that overrides the global model settings."""
+    lines = []
+    for character in characters or []:
+        if not isinstance(character, dict):
+            continue
+        parts = []
+        if str(character.get("model") or "").strip():
+            parts.append(f"model={character['model'].strip()}")
+        if character.get("temperature") is not None:
+            parts.append(f"temperature={character['temperature']}")
+        if character.get("max_tokens"):
+            parts.append(f"max_tokens={character['max_tokens']}")
+        if parts:
+            name = character.get("name") or character.get("id") or "?"
+            lines.append(f"{name}: " + " ".join(parts) + " (overrides)")
+    return lines
 
 
 def run_server(config_path: Path) -> int:
     cfg = load_config(str(config_path))
     cfg.config_path = str(config_path.resolve())
-    server.init(cfg)
+    server.init(cfg, catalog=_fetch_catalog(cfg))
     try:
         servers = server.start_all(cfg)
     except OSError as exc:

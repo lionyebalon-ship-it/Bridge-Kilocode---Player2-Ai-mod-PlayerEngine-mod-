@@ -16,10 +16,12 @@ from typing import Any, Optional
 from urllib.parse import unquote
 
 from p2k_bridge.budget import TokenBudget
+from p2k_bridge.catalog import ModelCatalog
 from p2k_bridge.config import BridgeConfig
 from p2k_bridge.kilo import KiloClient, KiloError
 from p2k_bridge.normalize import normalize_llm_content, set_model, to_openai_envelope
 from p2k_bridge.ratelimit import TokenBucket
+from p2k_bridge.routing import UNKNOWN, character_overrides, resolve_route
 from p2k_bridge.state import STATE
 
 SERVICE_NAME = "p2k-bridge"
@@ -38,6 +40,7 @@ BUDGET: Optional[TokenBudget] = None
 BUDGET_ENABLED: bool = False
 KILO: Optional[KiloClient] = None
 CONFIG_PATH: Optional[str] = None
+CATALOG: ModelCatalog = ModelCatalog()
 
 CHARACTERS_FILENAME = "characters.json"
 _CHARACTERS_LOCK = threading.Lock()
@@ -48,8 +51,12 @@ _ID_MAX_LENGTH = 64
 _ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
-def init(cfg: BridgeConfig, config_path: Optional[str] = None) -> BridgeConfig:
-    global CFG, BUCKET, BUDGET, BUDGET_ENABLED, KILO, CONFIG_PATH
+def init(
+    cfg: BridgeConfig,
+    config_path: Optional[str] = None,
+    catalog: Optional[ModelCatalog] = None,
+) -> BridgeConfig:
+    global CFG, BUCKET, BUDGET, BUDGET_ENABLED, KILO, CONFIG_PATH, CATALOG
     CFG = cfg
     BUCKET = TokenBucket(cfg.requests_per_hour)
     BUDGET_ENABLED = getattr(cfg, "token_budget_per_window", 0) > 0
@@ -63,9 +70,62 @@ def init(cfg: BridgeConfig, config_path: Optional[str] = None) -> BridgeConfig:
     CONFIG_PATH = (
         config_path or getattr(cfg, "config_path", None) or os.environ.get("P2K_CONFIG") or None
     )
+    # An empty/default catalog means "no per-model data", which degrades every
+    # lookup to the configured globals — identical to pre-routing behaviour.
+    CATALOG = catalog if isinstance(catalog, ModelCatalog) else ModelCatalog()
     STATE.set_characters(load_characters(cfg))
     set_model(cfg.model)
     return cfg
+
+
+def roster() -> list[dict]:
+    """The live character roster (hot-reloaded from characters.json)."""
+    chars = STATE.characters
+    return [c for c in chars if isinstance(c, dict)]
+
+
+# Models we have already warned about, so a character pinned to a model that is
+# no longer in the catalog produces one warning rather than one per turn.
+_WARNED_MODELS: set[str] = set()
+_WARNED_MODELS_LOCK = threading.Lock()
+
+
+def _resolve_route_safe(messages: list[dict]) -> Any:
+    """Resolve the route, degrading to the global model rather than failing.
+
+    Two things can go wrong here and neither is allowed to break the chat path:
+    the classifier can raise, or a character can name a model that is not in the
+    catalog. Both fall back to the global route and get logged once.
+    """
+    try:
+        chars = roster()
+    except Exception as exc:  # pragma: no cover - defensive
+        LOG.warning("roster unavailable for routing: %s", exc)
+        chars = []
+    try:
+        route = resolve_route(messages, chars, CFG, CATALOG)
+    except Exception as exc:
+        LOG.warning("route resolution failed (%s); using global model", exc)
+        return None
+    if route.model and route.model not in CATALOG and CATALOG is not None and len(CATALOG):
+        with _WARNED_MODELS_LOCK:
+            already = route.model in _WARNED_MODELS
+            if not already:
+                _WARNED_MODELS.add(route.model)
+        if not already:
+            LOG.warning(
+                "character %r names model %r, which is not in the gateway catalog; "
+                "falling back to the global model %r",
+                route.character_id or "-",
+                route.model,
+                CFG.model if CFG is not None else "",
+            )
+            route.model = CFG.model if CFG is not None else route.model
+            route.max_completion_tokens = (
+                CFG.max_tokens if CFG is not None else route.max_completion_tokens
+            )
+            route.supports_temperature = True
+    return route
 
 
 def _valid_messages(messages: Any) -> bool:
@@ -217,6 +277,40 @@ def _reset_characters_cache() -> None:
     _CHARACTERS_CACHE.update(path=None, mtime=None, chars=None)
 
 
+def _warn_shadowed_config_overrides(served: list[dict], cfg: Optional[BridgeConfig]) -> None:
+    """Warn when per-character overrides in config.json are being ignored.
+
+    ``characters.json`` wins over the ``characters`` array in ``config.json``, so
+    a model/temperature override set in the config is silently unused as soon as
+    the roster file exists. That is easy to lose an afternoon to, so it is worth
+    one line at startup rather than silence.
+    """
+    if not isinstance(cfg, BridgeConfig):
+        return
+    configured = _cfg_characters(cfg)
+    if not configured:
+        return
+    served_ids = {c.get("id") for c in served if isinstance(c, dict)}
+    shadowed = []
+    for character in configured:
+        if not isinstance(character, dict):
+            continue
+        overrides = character_overrides(character)
+        if overrides and character.get("id") in served_ids:
+            # Values as well as keys: "1 character ignored" is not something you
+            # can act on without opening the file.
+            detail = ", ".join(f"{k}={overrides[k]!r}" for k in sorted(overrides))
+            shadowed.append("%r (%s)" % (character.get("id"), detail))
+    if not shadowed:
+        return
+    LOG.warning(
+        "%d character(s) in bridge/config.json set model/temperature/max_tokens, but "
+        "bridge/characters.json is served instead — those overrides are ignored: %s",
+        len(shadowed),
+        "; ".join(shadowed),
+    )
+
+
 def load_characters(cfg: Optional[BridgeConfig]) -> list[dict]:
     """Return the character roster, hot-reloading characters.json on change.
 
@@ -273,6 +367,10 @@ def load_characters(cfg: Optional[BridgeConfig]) -> list[dict]:
         path,
         len(roster),
     )
+    # Only on a fresh load: this is a permanent misconfiguration, not something
+    # that changes per reload, and the hot-reload path calls this very often.
+    if not reloaded:
+        _warn_shadowed_config_overrides(roster, cfg)
     return roster
 
 
@@ -294,6 +392,7 @@ def _record_chat(
     completion_tokens: int,
     total_tokens: int,
     preview: str,
+    route: Any = None,
 ) -> None:
     """Journal one chat request and emit the single INFO summary line."""
     duration_ms = int((time.monotonic() - t0) * 1000)
@@ -303,6 +402,9 @@ def _record_chat(
         total_tokens = max(0, int(total_tokens or 0))
     except (TypeError, ValueError):
         prompt_tokens = completion_tokens = total_tokens = 0
+    kind = getattr(route, "kind", "") if route is not None else ""
+    character_id = getattr(route, "character_id", "") if route is not None else ""
+    model = getattr(route, "model", "") if route is not None else ""
     STATE.record_request(
         status=status,
         duration_ms=duration_ms,
@@ -310,10 +412,25 @@ def _record_chat(
         completion_tokens=completion_tokens,
         total_tokens=total_tokens,
         preview=preview,
+        kind=kind,
+        character_id=character_id,
+        model=model,
     )
+    # The identity fields are appended only when something was resolved, so a
+    # request the classifier could not attribute reads exactly as it did before
+    # routing existed.
+    identity = ""
+    if kind or character_id or model:
+        resolved_model = model or (CFG.model if CFG is not None else "")
+        identity = " kind=%s char=%s model=%s" % (
+            kind or UNKNOWN,
+            character_id or "-",
+            resolved_model or "-",
+        )
     LOG.info(
-        'chat status=%s %dtok (%din/%dout) %dms :: "%s"',
+        'chat status=%s%s %dtok (%din/%dout) %dms :: "%s"',
         status,
+        identity,
         total_tokens,
         prompt_tokens,
         completion_tokens,
@@ -394,13 +511,17 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return
         t0 = time.monotonic()
         preview = _chat_preview(messages)
+        # Which model answers this one. Purely additive: with no per-character
+        # overrides in the roster, the resolved route reproduces the global
+        # model/temperature/max_tokens, so a clean checkout behaves as before.
+        route = _resolve_route_safe(messages)
         STATE.increment("chat_requests")
         STATE.increment("bytes_up", len(body))
         if BUCKET is None or not BUCKET.try_acquire():
             STATE.increment("rate_limited")
             cap = CFG.requests_per_hour if CFG is not None else 0
             LOG.warning("rate limited (%s req/hour quota exhausted; degraded reply)", cap)
-            _record_chat("rate_limited", t0, 0, 0, 0, preview)
+            _record_chat("rate_limited", t0, 0, 0, 0, preview, route)
             self._send_json(to_openai_envelope({"reason": "", "command": "", "message": ""}))
             return
         reserved = TokenBudget.estimate_tokens(messages) + (CFG.max_tokens if CFG is not None else 0)
@@ -408,13 +529,13 @@ class BridgeHandler(BaseHTTPRequestHandler):
             STATE.increment("rate_limited")
             remaining = BUDGET.remaining() if BUDGET is not None else 0
             LOG.info("token budget exhausted (remaining=%d)", remaining)
-            _record_chat("budget_exhausted", t0, 0, 0, 0, preview)
+            _record_chat("budget_exhausted", t0, 0, 0, 0, preview, route)
             self._send_json(to_openai_envelope({"reason": "", "command": "", "message": ""}))
             return
         try:
             if KILO is None:
                 raise KiloError("kilo client not initialized")
-            resp = KILO.chat_completion(messages)
+            resp = KILO.chat_completion(messages, route)
             content = resp["choices"][0]["message"]["content"]
             obj = normalize_llm_content(content)
             usage = resp.get("usage") if isinstance(resp, dict) else None
@@ -438,15 +559,15 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 )
             STATE.increment("chat_ok")
             STATE.increment("bytes_down", 0)
-            _record_chat("ok", t0, prompt_tokens, completion_tokens, usage_total or 0, preview)
-            self._send_json(to_openai_envelope(obj))
+            _record_chat("ok", t0, prompt_tokens, completion_tokens, usage_total or 0, preview, route)
+            self._send_json(to_openai_envelope(obj, model=route.model))
         except KiloError as exc:
             if BUDGET_ENABLED and BUDGET is not None:
                 BUDGET.refund(reserved)
             STATE.increment("chat_failed")
             STATE.increment("kilo_errors")
             LOG.error("%s", exc)
-            _record_chat("kilo_error", t0, 0, 0, 0, preview)
+            _record_chat("kilo_error", t0, 0, 0, 0, preview, route)
             self._send_json(to_openai_envelope({"reason": "kilo unavailable", "command": "", "message": ""}))
         except Exception as exc:
             if BUDGET_ENABLED and BUDGET is not None:
@@ -454,7 +575,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             STATE.increment("chat_failed")
             STATE.increment("kilo_errors")
             LOG.error("unexpected chat failure: %s", exc)
-            _record_chat("kilo_error", t0, 0, 0, 0, preview)
+            _record_chat("kilo_error", t0, 0, 0, 0, preview, route)
             self._send_json(to_openai_envelope({"reason": "kilo unavailable", "command": "", "message": ""}))
 
     def _route_get(self, path: str) -> None:

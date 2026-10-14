@@ -138,6 +138,9 @@ class BridgeState:
         completion_tokens: int = 0,
         total_tokens: int = 0,
         preview: str = "",
+        kind: str = "",
+        character_id: str = "",
+        model: str = "",
     ) -> None:
         """Append one chat-call record to the journal (newest at the right)."""
         cleaned_status = "" if status is None else str(status).strip()
@@ -149,6 +152,9 @@ class BridgeState:
             "completion_tokens": _non_negative_int(completion_tokens),
             "total_tokens": _non_negative_int(total_tokens),
             "preview": _clean_preview(preview),
+            "kind": "" if kind is None else str(kind).strip(),
+            "character_id": "" if character_id is None else str(character_id).strip(),
+            "model": "" if model is None else str(model).strip(),
         }
         with self._lock:
             self._request_journal.append(entry)

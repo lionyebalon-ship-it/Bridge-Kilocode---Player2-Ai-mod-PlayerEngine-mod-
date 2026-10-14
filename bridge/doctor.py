@@ -673,6 +673,46 @@ def check_gateway(url: str, model: str, *, api_key: str = "", getter=None,
                  "python3 bridge/run.py --check")
 
 
+def check_roster_models(
+    url: str,
+    model_ids: list[str],
+    *,
+    api_key: str = "",
+    getter=None,
+    timeout: float = GATEWAY_TIMEOUT,
+) -> Check:
+    """Every model named by a character must exist in the gateway catalog.
+
+    A character pinned to a model that has left the catalog does not fail, but
+    that NPC silently answers with the global model instead of the one it was
+    configured for — which is exactly the kind of drift a pre-flight should
+    surface before someone tries to debug it in-game.
+    """
+    if not model_ids:
+        return Check(12, "roster models", STATUS_SKIP,
+                     "no character overrides its model", "")
+    getter = getter if getter is not None else http_get
+    headers = {"Accept": "application/json", "User-Agent": USER_AGENT}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    result = getter(url, timeout=timeout, headers=headers)
+    if result.status != 200 or not isinstance(result.data, dict):
+        return Check(12, "roster models", STATUS_SKIP,
+                     f"catalog unavailable (status={result.status} kind={result.kind}); "
+                     "roster models not verified", "")
+    raw = result.data.get("data", [])
+    ids = {entry.get("id") for entry in raw
+           if isinstance(entry, dict) and isinstance(entry.get("id"), str)} if isinstance(raw, list) else set()
+    missing = [model_id for model_id in model_ids if model_id not in ids]
+    if not missing:
+        return Check(12, "roster models", STATUS_PASS,
+                     f"all {len(model_ids)} roster model(s) present in the catalog")
+    return Check(12, "roster models", STATUS_WARN,
+                 f"roster model(s) MISSING from the catalog: " + ", ".join(missing),
+                 "those characters fall back to the global model; update bridge/config.json "
+                 "or run: python3 bridge/run.py --check")
+
+
 def check_chat(url: str, model: str, *, poster=None, timeout: float = CHAT_TIMEOUT) -> Check:
     poster = poster if poster is not None else http_post
     payload = {
@@ -739,6 +779,7 @@ def run_all(cfg, *, environ: Optional[dict] = None, now: Optional[datetime] = No
     api_key = (getattr(cfg, "kilo_api_key", "") or "").strip()
     model = getattr(cfg, "model", "")
     gateway_url = (getattr(cfg, "kilo_base_url", "") or "").rstrip("/") + "/models"
+    roster_models = _roster_models(cfg)
 
     results: list[Check] = []
     results.append(check_python_version(sys.version_info))
@@ -750,9 +791,22 @@ def run_all(cfg, *, environ: Optional[dict] = None, now: Optional[datetime] = No
     results.append(check_tls(tls_url, certs_dir / "p2k_ca.crt", (LOOPBACK_IP, int(cfg.tls_port))))
     results.extend(check_jvm())
     results.append(check_gateway(gateway_url, model, api_key=api_key))
+    results.append(check_roster_models(gateway_url, roster_models, api_key=api_key))
     results.append(check_chat(f"{http_base}/v1/chat/completions", model))
     results.append(check_quota(f"{http_base}/bridge/stats"))
     return results
+
+
+def _roster_models(cfg) -> list[str]:
+    """Distinct models referenced by the roster, the global model first."""
+    ordered: list[str] = []
+    for model_id in [getattr(cfg, "model", "") or ""] + [
+        character.get("model") for character in getattr(cfg, "characters", []) or []
+        if isinstance(character, dict)
+    ]:
+        if isinstance(model_id, str) and model_id.strip() and model_id.strip() not in ordered:
+            ordered.append(model_id.strip())
+    return ordered
 
 
 def format_line(check: Check) -> str:

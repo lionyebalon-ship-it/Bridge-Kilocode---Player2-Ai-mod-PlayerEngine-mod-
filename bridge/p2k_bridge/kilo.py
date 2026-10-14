@@ -22,7 +22,14 @@ _OUTPUT_HEADROOM = 1024
 _MIN_OUTPUT_TOKENS = 256
 
 
-def compute_max_tokens(cfg: BridgeConfig, messages: list[dict]) -> int:
+def compute_max_tokens(
+    cfg: BridgeConfig,
+    messages: list[dict],
+    *,
+    context_limit: Optional[int] = None,
+    max_tokens: Optional[int] = None,
+    max_completion_tokens: Optional[int] = None,
+) -> int:
     """Effective max_tokens for this request.
 
     The user wants a large "free reign" cap (default 500k), not the model's
@@ -31,17 +38,34 @@ def compute_max_tokens(cfg: BridgeConfig, messages: list[dict]) -> int:
     smaller of cfg.max_tokens and (context window - estimated input - headroom),
     which keeps input+output within the model context and avoids gateway errors.
 
+    The three keyword arguments let a caller override the corresponding config
+    value for this request (used for per-character model routing). ``None`` means
+    "use cfg", so the behaviour is unchanged for every existing caller.
+
     Floored at _MIN_OUTPUT_TOKENS and never returned above cfg.max_tokens, so the
     value stays sane even for degenerate contexts while never exceeding the cap.
     """
-    max_tokens = int(getattr(cfg, "max_tokens", 0))
-    context_limit = int(getattr(cfg, "model_context_limit", 0))
-    if context_limit > 0:
-        available = context_limit - TokenBudget.estimate_tokens(messages) - _OUTPUT_HEADROOM
-        ceiling = min(max_tokens, available)
+    cap = int(max_tokens if max_tokens is not None else getattr(cfg, "max_tokens", 0))
+    limit = int(
+        context_limit if context_limit is not None else getattr(cfg, "model_context_limit", 0)
+    )
+    ceiling = int(
+        max_completion_tokens
+        if max_completion_tokens is not None
+        else getattr(cfg, "max_tokens", 0)
+    )
+    if limit > 0:
+        available = limit - TokenBudget.estimate_tokens(messages) - _OUTPUT_HEADROOM
+        # The provider's per-response cap is also a ceiling: some models publish
+        # a context window much larger than the completion window they accept
+        # (e.g. liquid/lfm-2.5-2.6b:free: 65536 context, 8192 completion).
+        # Without this the bridge would ask for more than the provider allows.
+        if ceiling > 0:
+            available = min(available, ceiling)
+        ceiling = min(cap, available)
     else:
-        ceiling = max_tokens
-    return max(_MIN_OUTPUT_TOKENS, min(ceiling, max_tokens))
+        ceiling = cap
+    return max(_MIN_OUTPUT_TOKENS, min(ceiling, cap))
 
 
 class KiloError(Exception):
@@ -123,16 +147,46 @@ class KiloClient:
         except ValueError:
             raise KiloError("malformed response", status=200) from None
 
-    def chat_completion(self, messages: list[dict]) -> dict:
-        """POST a chat completion request and return the parsed gateway response."""
-        max_tokens = compute_max_tokens(self._cfg, messages)
-        _LOGGER.debug("effective max_tokens=%d", max_tokens)
+    def chat_completion(
+        self,
+        messages: list[dict],
+        route: Any = None,
+    ) -> dict:
+        """POST a chat completion request and return the parsed gateway response.
+
+        ``route`` (a ``p2k_bridge.routing.Route``) carries per-character model,
+        temperature and token settings. When it is ``None`` the request is built
+        from the instance's own config, exactly as before.
+        """
+        if route is None:
+            model = self._cfg.model
+            temperature = self._cfg.temperature
+            max_tokens = compute_max_tokens(self._cfg, messages)
+            supports_temperature = True
+        else:
+            model = route.model or self._cfg.model
+            temperature = float(getattr(route, "temperature", self._cfg.temperature))
+            max_tokens = compute_max_tokens(
+                self._cfg,
+                messages,
+                context_limit=getattr(route, "context_limit", None),
+                max_tokens=getattr(route, "max_tokens", None),
+                max_completion_tokens=getattr(route, "max_completion_tokens", None),
+            )
+            supports_temperature = bool(getattr(route, "supports_temperature", True))
+
         payload = {
-            "model": self._cfg.model,
+            "model": model,
             "messages": messages,
             "max_tokens": max_tokens,
-            "temperature": self._cfg.temperature,
         }
+        # Omitting temperature (rather than sending an unsupported one) keeps a
+        # character pinned to a model that ignores it from being rejected.
+        if supports_temperature:
+            payload["temperature"] = temperature
+        _LOGGER.debug(
+            "effective model=%s max_tokens=%d temperature=%s", model, max_tokens, temperature
+        )
         data = self._request("POST", f"{self._base_url}/chat/completions", payload)
         if not isinstance(data, dict):
             raise KiloError("malformed response", status=200)

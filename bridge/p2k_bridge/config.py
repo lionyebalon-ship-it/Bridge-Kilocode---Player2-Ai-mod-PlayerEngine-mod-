@@ -15,6 +15,14 @@ DEFAULT_CHARACTER: dict[str, Any] = {
     "description": "You are a helpful, concise Minecraft companion AI agent.",
     "voice_ids": [],
     "meta": {"skin_url": ""},
+    # Optional per-character model overrides. Empty/zero = inherit the global
+    # values in bridge/config.json. There is deliberately no
+    # `model_context_limit` key: the context window is read from the gateway
+    # catalog (p2k_bridge.catalog), because a hand-entered value that does not
+    # match the model would silently truncate replies.
+    "model": "",
+    "temperature": None,
+    "max_tokens": 0,
 }
 
 DEFAULT_CHARACTERS: list[dict] = [copy.deepcopy(DEFAULT_CHARACTER)]
@@ -74,8 +82,47 @@ def _coerce_characters(value: Any) -> list[dict] | None:
     if isinstance(value, dict):
         return [dict(value)]
     if isinstance(value, list):
-        return [item for item in value if isinstance(item, dict)]
+        return [_normalize_character(item) for item in value if isinstance(item, dict)]
     return None
+
+
+# Per-character keys the bridge acts on. Anything else in a roster entry
+# (greeting, description, voice_ids, meta, ...) is passed through untouched — it
+# belongs to the mod, not to us.
+_CHARACTER_OVERRIDE_KEYS = ("model", "temperature", "max_tokens")
+_MAX_TEMPERATURE = 2.0
+
+
+def _normalize_character(entry: dict) -> dict:
+    """Validate one roster entry's override keys in place.
+
+    Malformed values are dropped rather than raising: a mistyped ``temperature``
+    must not stop the bridge (or the rest of the roster) from loading, it just
+    means that character answers with the global setting.
+    """
+    normalized = dict(entry)
+
+    model = normalized.get("model")
+    if not isinstance(model, str) or not model.strip():
+        normalized.pop("model", None)
+    else:
+        normalized["model"] = model.strip()
+
+    temperature = normalized.get("temperature")
+    if isinstance(temperature, bool) or not isinstance(temperature, (int, float)):
+        normalized.pop("temperature", None)
+    else:
+        number = float(temperature)
+        if not 0.0 <= number <= _MAX_TEMPERATURE:
+            normalized.pop("temperature", None)
+        else:
+            normalized["temperature"] = number
+
+    max_tokens = normalized.get("max_tokens")
+    if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens <= 0:
+        normalized.pop("max_tokens", None)
+
+    return normalized
 
 
 def _field_types() -> dict[str, type]:

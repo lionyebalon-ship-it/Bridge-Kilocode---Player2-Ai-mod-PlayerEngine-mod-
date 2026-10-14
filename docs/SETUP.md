@@ -107,7 +107,7 @@ The mods still believe they are talking to the Player2 platform. The bridge answ
 
 | Endpoint | Behavior |
 |---|---|
-| POST `/v1/chat/completions` | Forwards to the Kilo Gateway with the model pinned to `nvidia/nemotron-3-super-120b-a12b:free`; normalizes the model output into the mod's `{reason, command, message}` JSON; never returns non-200 — degraded idle replies instead |
+| POST `/v1/chat/completions` | Forwards to the Kilo Gateway; the model comes from the identified character's override when set, else the global one (`nvidia/nemotron-3-super-120b-a12b:free`); normalizes the model output into the mod's `{reason, command, message}` JSON; never returns non-200 — degraded idle replies instead |
 | GET `/v1/health` | Heartbeat (`client_version` key present) |
 | GET `/v1/selected_characters` | Served from `bridge/characters.json` when present, else from `bridge/config.json`; hot-reloaded on change |
 | POST `/v1/login/web/{gameKey}` | Instant p2Key (served by both the 4315 shim and the TLS listener) |
@@ -125,16 +125,18 @@ The mods still believe they are talking to the Player2 platform. The bridge answ
 Ops visibility: `GET /bridge/stats` embeds `token_budget` + `requests {limit_per_hour, available, refill_per_sec}` + `recent_requests` (the journal, newest-first, ≤20: `ts`, `status`, `duration_ms`, `prompt_tokens`, `completion_tokens`, `total_tokens`, `preview`).
 
 ## Monitoring
-- Per-request log line (one per chat call): `[INFO] p2k.bridge: chat status=ok 242tok (74in/168out) 1523ms :: "preview"` — statuses are `ok`, `rate_limited`, `kilo_error`, `budget_exhausted` (the last is unreachable with the default disabled budget). The API key is never logged.
+- Per-request log line (one per chat call): `[INFO] p2k.bridge: chat status=ok 242tok (74in/168out) 1523ms :: "preview"` — statuses are `ok`, `rate_limited`, `kilo_error`, `budget_exhausted` (the last is unreachable with the default disabled budget). When the request could be attributed, the line also carries `kind=`, `char=` and `model=`. The API key is never logged.
 - Live dashboard:
   ```bash
   python3 bridge/monitor.py [--url http://127.0.0.1:9800] [--interval 1.0] [--once]
   ```
   Shows requests remaining this hour + refill rate, the counters (`chat_requests/ok/failed`, `rate_limited`, `kilo_errors`, bytes up), token usage (window + lifetime, with the disabled-budget note), and a recent-requests table (time, status, in/out/total tokens, ms, preview — at most 10 rows live, ≤20 in the JSON).
 - `curl -s http://127.0.0.1:9800/bridge/stats` — JSON keys: `started_at`, `uptime_seconds`, `chat_requests`, `chat_ok`, `chat_failed`, `kilo_errors`, `rate_limited`, `bytes_up`, `bytes_down` (always 0 — request bytes only), `recent_requests`, `token_budget`, `requests`.
-
 ## Characters
-The NPC roster lives in `bridge/characters.json` (`{"characters":[{id, name, short_name, greeting, description, voice_ids, meta:{skin_url}}]}`) and hot-reloads without restarting the bridge — changes appear the next time the in-game H menu is opened. All characters share the pinned model (one brain, many faces — the model is a single global setting in `bridge/config.json`, not per character).
+
+The NPC roster lives in `bridge/characters.json` (`{"characters":[{id, name, short_name, greeting, description, voice_ids, meta:{skin_url}}]}`) and hot-reloads without restarting the bridge — changes appear the next time the in-game H menu is opened.
+
+Each character may override the global model, `temperature` and `max_tokens` (opt-in; unset means inherit). See **[CHARACTERS.md](CHARACTERS.md)** for the full table — and note that overrides placed in the `characters` array of `bridge/config.json` are ignored while `bridge/characters.json` exists (the bridge warns at startup when that happens). Context windows are read from the gateway catalog, not configured per character.
 
 ```bash
 python3 bridge/characters.py list                              # table incl. IDs
@@ -145,11 +147,30 @@ python3 bridge/characters.py remove --name "Bob the Miner"
 
 The mod requires a non-empty `id` per character (it persists the companion's state; characters without one abort spawning with "Persisted companion state was unavailable or rejected"). The CLI auto-generates the id (slug of the short name, e.g. `bob`) and the bridge backfills missing ids at serve time without rewriting the file. Keep ids stable — renaming an id orphans the companion's stored state. Full guide: docs/CHARACTERS.md.
 
+## Chat-call logging and routing
+
+Every chat call is logged with what it turned out to be, which makes it easy to
+see how a turn breaks down:
+
+```
+[INFO] p2k.bridge: chat status=ok kind=conversation char=kilo model=nvidia/nemotron-3.5-lightning:free 2845tok (1201in/1644out) 41081ms :: "preview"
+```
+
+`kind` is one of `conversation`, `command_feedback`, `greeting`, `event`,
+`npc_dialogue`, `memory_extraction` or `unknown`. It is derived from the payload
+the mod sends and affects **nothing functional today** — it is there so you can
+tell how a turn splits into calls, and so a future routing policy can be a config
+change. An `unknown` kind means the payload matched no known shape, which is the
+signal to check that the mods have not changed their format.
+
+`kind`, `character_id` and `model` are also in `/bridge/stats` →
+`recent_requests[]`.
+
 ## Pre-flight diagnostic (recommended)
 ```bash
 python3 bridge/doctor.py [--json] [--quiet]
 ```
-Checks, in one run: python version, `.env`/key presence, TLS certs + SAN, the hosts entry, bridge liveness on 9800, the login shim on 4315, the TLS listener on 443 (with the CA), JVM trust per discovered java home (including launcher runtimes — with the exact `trust_jvm.sh` fix when missing), Kilo Gateway reachability + pinned-model presence, one real end-to-end chat call through the bridge, and the request quota. Exit 0 = all PASS/WARN, 1 = any FAIL. A green doctor run means the whole chain works on your machine.
+Checks, in one run: python version, `.env`/key presence, TLS certs + SAN, the hosts entry, bridge liveness on 9800, the login shim on 4315, the TLS listener on 443 (with the CA), JVM trust per discovered java home (including launcher runtimes — with the exact `trust_jvm.sh` fix when missing), Kilo Gateway reachability + pinned-model presence, every model named by the roster, one real end-to-end chat call through the bridge, and the request quota. Exit 0 = all PASS/WARN, 1 = any FAIL. A green doctor run means the whole chain works on your machine.
 
 ## Troubleshooting
 | Symptom | Likely cause & fix |

@@ -3,6 +3,7 @@
 import json
 import re
 import time
+from typing import Optional
 
 _FENCE_RE = re.compile(r"```[ \t]*[A-Za-z0-9_+.\-]*")
 _MODEL_NAME = "p2k-bridge"
@@ -103,13 +104,18 @@ def normalize_llm_content(content: str) -> dict:
     }
 
 
-def to_openai_envelope(obj: dict) -> dict:
-    """Wrap a normalized response object in an OpenAI chat.completion envelope."""
+def to_openai_envelope(obj: dict, model: Optional[str] = None) -> dict:
+    """Wrap a normalized response object in an OpenAI chat.completion envelope.
+
+    ``model`` reports the model that actually answered. It defaults to the
+    configured global model, so per-character routing can report the truth
+    without every caller having to pass it.
+    """
     return {
         "id": "chatcmpl-p2k",
         "object": "chat.completion",
         "created": int(time.time()),
-        "model": _MODEL_NAME,
+        "model": (model or _MODEL_NAME),
         "choices": [
             {
                 "index": 0,

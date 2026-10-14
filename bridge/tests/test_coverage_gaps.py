@@ -16,12 +16,15 @@ import time
 import unittest
 import urllib.error
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, ".")
 sys.path.insert(0, "..")
 
 import server  # noqa: E402
+from p2k_bridge.catalog import ModelCatalog  # noqa: E402
 from p2k_bridge.config import BridgeConfig  # noqa: E402
+from p2k_bridge.routing import CONVERSATION, Route  # noqa: E402
 from p2k_bridge.state import BridgeState  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -140,6 +143,197 @@ class BridgeHarness(unittest.TestCase):
     def stats(self):
         status, raw = self.request("GET", "/bridge/stats")
         return json.loads(raw)
+
+
+class RoutingWiringTests(BridgeHarness):
+    """Routing must be observable and must never break the chat path."""
+
+    def _messages(self, user_text, system_text=None):
+        messages = []
+        if system_text:
+            messages.append({"role": "system", "content": system_text})
+        messages.append({"role": "user", "content": user_text})
+        return messages
+
+    def test_no_overrides_sends_the_global_model_and_temperature(self):
+        self.start_bridge()
+        self.post_chat({"messages": self._messages('{"userMessage":"User Message: [a]: hi"}')})
+        body = json.loads(self.stub.recorder["requests"][-1]["body"])
+        self.assertEqual(body["model"], "nvidia/nemotron-3-super-120b-a12b:free")
+        self.assertIn("temperature", body)
+
+    def _write_roster(self, characters):
+        """Create a temp config dir holding characters.json and return its path.
+
+        characters.json is the served roster and takes precedence over the
+        ``characters`` array in config.json, so this is the path a real override
+        actually travels. The temp dir must be passed as ``config_path`` to
+        start_bridge, otherwise the loader falls back to bridge/characters.json.
+        """
+        import tempfile
+
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        path = Path(self._tmpdir.name) / "characters.json"
+        path.write_text(json.dumps({"characters": characters}), encoding="utf-8")
+        # characters.json is looked up in the *parent* of the config path, so
+        # return a config.json path in this directory (the file need not exist).
+        return str(Path(self._tmpdir.name) / "config.json")
+
+    def test_character_model_override_reaches_the_gateway(self):
+        config_path = self._write_roster(
+            [
+                {
+                    "id": "kilo",
+                    "name": "Kilo",
+                    "short_name": "KILO",
+                    "greeting": "hi",
+                    "description": "d",
+                    "model": "nvidia/nemotron-3.5-lightning:free",
+                    "temperature": 1.1,
+                    "max_tokens": 4096,
+                }
+            ]
+        )
+        self.start_bridge(config_path=config_path)
+        self.post_chat(
+            {"messages": self._messages(
+                '{"userMessage":"User Message: [a]: hi"}',
+                "Your character's name is Kilo.",
+            )}
+        )
+        body = json.loads(self.stub.recorder["requests"][-1]["body"])
+        self.assertEqual(body["model"], "nvidia/nemotron-3.5-lightning:free")
+        self.assertEqual(body["temperature"], 1.1)
+
+    def test_missing_character_model_degrades_to_global(self):
+        # A character pinned to a model that has left the catalog must fall back
+        # to the global model rather than fail the request.
+        config_path = self._write_roster(
+            [{"id": "kilo", "name": "Kilo", "short_name": "KILO",
+              "model": "not/a-real-model:free"}]
+        )
+        self.start_bridge(config_path=config_path, model="global/fallback:free")
+        # A catalog that knows the global model but not the character's.
+        server.CATALOG = ModelCatalog.from_payload(
+            {"data": [{"id": "global/fallback:free", "context_length": 1000,
+                       "supported_parameters": ["max_tokens", "temperature"]}]}
+        )
+        status, raw = self.post_chat(
+            {"messages": self._messages(
+                '{"userMessage":"User Message: [a]: hi"}',
+                "Your character's name is Kilo.",
+            )}
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(raw)
+        body = json.loads(self.stub.recorder["requests"][-1]["body"])
+        self.assertEqual(body["model"], "global/fallback:free")
+
+    def test_config_characters_are_shadowed_by_characters_json(self):
+        # Regression for the silent-precedence footgun: config.json overrides
+        # are ignored once characters.json exists, and that must be visible.
+        config_path = self._write_roster(
+            [{"id": "kilo", "name": "Kilo", "short_name": "KILO",
+              "model": "file/model:free"}]
+        )
+        with self.assertLogs("p2k.bridge", level="WARNING") as captured:
+            self.start_bridge(
+                config_path=config_path,
+                characters=[{"id": "kilo", "name": "Kilo", "short_name": "KILO",
+                             "model": "config/model:free"}],
+            )
+        warnings = "\n".join(captured.output)
+        self.assertIn("are ignored", warnings)
+        self.assertIn("config/model:free", warnings)
+
+    def test_journal_records_kind_character_and_model(self):
+        config_path = self._write_roster(
+            [{"id": "kilo", "name": "Kilo", "short_name": "KILO",
+              "model": "nvidia/nemotron-3.5-lightning:free"}]
+        )
+        self.start_bridge(config_path=config_path)
+        self.post_chat(
+            {"messages": self._messages(
+                '{"userMessage":"User Message: [a]: hi"}',
+                "Your character's name is Kilo.",
+            )}
+        )
+        entry = json.loads(self.request("GET", "/bridge/stats")[1])["recent_requests"][0]
+        self.assertEqual(entry["kind"], "conversation")
+        self.assertEqual(entry["character_id"], "kilo")
+        self.assertEqual(entry["model"], "nvidia/nemotron-3.5-lightning:free")
+
+    def test_rate_limited_reply_still_carries_route(self):
+        # The degraded envelope must not lose the routing metadata, or the logs
+        # show an unattributed request.
+        self.start_bridge(requests_per_hour=1)
+        self.post_chat({"messages": self._messages("hello")})
+        self.post_chat({"messages": self._messages("hello")})
+        entries = json.loads(self.request("GET", "/bridge/stats")[1])["recent_requests"]
+        self.assertEqual(entries[0]["status"], "rate_limited")
+        self.assertEqual(entries[0]["kind"], "unknown")
+        self.assertEqual(entries[1]["status"], "ok")
+
+    def test_kilo_error_reply_still_carries_route(self):
+        self.start_bridge(kilo_behavior={"status": 500, "body": b"upstream boom"})
+        status, raw = self.post_chat({"messages": self._messages("hello")})
+        self.assertEqual(status, 200)
+        entry = json.loads(self.request("GET", "/bridge/stats")[1])["recent_requests"][0]
+        self.assertEqual(entry["status"], "kilo_error")
+        self.assertEqual(entry["kind"], "unknown")
+
+    def test_chat_completion_without_route_is_unchanged(self):
+        # Backwards compatibility for callers that do not route.
+        from p2k_bridge.config import BridgeConfig
+        from p2k_bridge.kilo import KiloClient
+
+        self.start_bridge()
+        cfg = BridgeConfig(model="global/model:free", temperature=0.25, max_tokens=500000)
+        client = KiloClient(cfg)
+        client._base_url = self.stub.base_url
+        client.chat_completion(NP_MESSAGES)
+        body = json.loads(self.stub.recorder["requests"][-1]["body"])
+        self.assertEqual(body["model"], "global/model:free")
+        self.assertEqual(body["temperature"], 0.25)
+
+    def test_chat_completion_with_route_overrides_everything(self):
+        from p2k_bridge.config import BridgeConfig
+        from p2k_bridge.kilo import KiloClient
+
+        self.start_bridge()
+        cfg = BridgeConfig(model="global/model:free", temperature=0.25, max_tokens=500000)
+        client = KiloClient(cfg)
+        client._base_url = self.stub.base_url
+        route = Route(
+            kind=CONVERSATION,
+            character_id="kilo",
+            model="character/model:free",
+            temperature=1.5,
+            max_tokens=4096,
+            context_limit=2000,
+            max_completion_tokens=500,
+        )
+        client.chat_completion(NP_MESSAGES, route)
+        body = json.loads(self.stub.recorder["requests"][-1]["body"])
+        self.assertEqual(body["model"], "character/model:free")
+        self.assertEqual(body["temperature"], 1.5)
+        # max_tokens must be clamped by the per-model context window (2000) and
+        # the provider's completion cap (500), not by the global 500000.
+        self.assertLessEqual(body["max_tokens"], 500)
+
+    def test_temperature_omitted_for_models_that_do_not_support_it(self):
+        from p2k_bridge.config import BridgeConfig
+        from p2k_bridge.kilo import KiloClient
+
+        self.start_bridge()
+        client = KiloClient(BridgeConfig(model="m", temperature=0.5))
+        client._base_url = self.stub.base_url
+        route = Route(kind=CONVERSATION, model="m", supports_temperature=False)
+        client.chat_completion(NP_MESSAGES, route)
+        body = json.loads(self.stub.recorder["requests"][-1]["body"])
+        self.assertNotIn("temperature", body)
+        self.assertIn("model", body)
 
 
 class RouteTests(BridgeHarness):
@@ -450,17 +644,33 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(server._chat_preview([{"role": "user"}]), "")
 
     def test_record_chat_bad_tokens(self):
+        # Bad token values must clamp to 0 rather than raise. Drive the real
+        # normalizer directly (record_request) so the assertion does not depend
+        # on _record_chat's exact arity.
         state = BridgeState()
-        server._record_chat("weird", 0.0, -5, "x" * 3, -1, -2, -3, "p", _state=state) \
-            if "_state" in server._record_chat.__code__.co_varnames else None
-        # signature-safe call path
-        try:
-            server._record_chat("ok", 0.0, -1, "x", -2, -3, "p")
-        except TypeError:
-            # if the signature differs, drive it through STATE instead
-            state.record_request("ok", -1, -2, -3, -4, "p")
+        state.record_request("ok", -1, "x", -2, -3, "p")
         entry = state.recent_requests(1)[0]
         self.assertEqual(entry["duration_ms"], 0)
+        self.assertEqual(entry["total_tokens"], 0)
+
+    def test_record_chat_records_route_fields(self):
+        state = BridgeState()
+        route = Route(kind="conversation", character_id="kilo", model="m/x:free")
+        with mock.patch.object(server, "STATE", state):
+            server._record_chat("ok", 0.0, 10, 5, 15, "p", route=route)
+        entry = state.recent_requests(1)[0]
+        self.assertEqual(entry["kind"], "conversation")
+        self.assertEqual(entry["character_id"], "kilo")
+        self.assertEqual(entry["model"], "m/x:free")
+
+    def test_record_chat_without_route_leaves_fields_blank(self):
+        state = BridgeState()
+        with mock.patch.object(server, "STATE", state):
+            server._record_chat("ok", 0.0, 10, 5, 15, "p")
+        entry = state.recent_requests(1)[0]
+        self.assertEqual(entry["kind"], "")
+        self.assertEqual(entry["character_id"], "")
+        self.assertEqual(entry["model"], "")
 
     def test_init_backfills_characters(self):
         with tempfile.TemporaryDirectory() as tmp:
