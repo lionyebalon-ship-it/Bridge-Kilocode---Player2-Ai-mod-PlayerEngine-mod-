@@ -30,6 +30,7 @@ bash scripts/start_mc.sh                            # boot NeoForge server (FIFO
 bash scripts/mc_cmd.sh <command>                    # send a server console command
 bash scripts/run_order.sh <user> "<msg>"            # drive one NPC order via the mineflayer bot
 node scripts/test_bot_framing.js                    # assert the 3-level user_message frame (no rig needed)
+node scripts/chat_path_probe.js <user> [seconds]   # prove a NORMAL chat message drives an NPC turn (rig up)
 ```
 
 ## Architecture facts that change how you work
@@ -89,13 +90,18 @@ node scripts/test_bot_framing.js                    # assert the 3-level user_me
   `{"text": ""}`, because an exception there would disrupt voice chat for every
   player. `text` (not `transcript`) is the reply key because that is the first one
   `STTUtils.extractTranscriptText` reads in the mod.
-  **No free STT model works today** — the two the catalog advertises either
-  report `audio_tokens: 0` (audio never ingested) or are at their daily cap — so
-  on a free key every utterance logs one WARNING and degrades to `{"text": ""}`.
-  Measured evidence in `docs/SETUP.md → Voice input`. The default
-  `mistralai/voxtral-small-24b-2507` is paid and needs a key.
+  **This path is DORMANT.** The recommended way to do voice input is the client
+  mod **Microphone Text Input** (`mcmti`, NeoForge 1.21.1): it runs Whisper
+  locally and sends the text as a normal chat message, and PlayerEngine already
+  hooks `ChatEvent$Received`, so it needs no bridge changes at all. Verified on
+  the rig. Prefer it over this endpoint unless server-side capture for **vanilla
+  clients** is specifically needed. The endpoint survives because it is the only
+  option that works without a modded client, and because it needs a paid STT
+  model: of the two free gateway models advertising audio, one reports
+  `audio_tokens: 0` and the other is at its daily cap.
   Per-character `stt_model` overrides resolve through `routing.resolve_route`, so
   voice routing reuses the chat routing rather than being a second config path.
+  Details: `docs/SETUP.md -> Voice input`.
 - **Chat evidence needs a file-backed bridge log.** `test_bridge.sh` and
   `run_order.sh` discover the bridge's stdout path through `/proc`, so start the
   bridge with a log file (`python3 bridge/run.py ... > bridge.log 2>&1`) or the

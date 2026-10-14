@@ -145,65 +145,104 @@ Ops visibility: `GET /bridge/stats` embeds `token_budget` + `requests {limit_per
 - `curl -s http://127.0.0.1:9800/bridge/stats` — JSON keys: `started_at`, `uptime_seconds`, `chat_requests`, `chat_ok`, `chat_failed`, `kilo_errors`, `rate_limited`, `bytes_up`, `bytes_down` (always 0 — request bytes only), `recent_requests`, `token_budget`, `requests`.
 ## Voice input
 
-NPCs can be driven by speech. The flow is:
+**Use [Microphone Text Input](https://modrinth.com/mod/mcmti) (`mcmti`).** It runs
+Whisper **locally on the player's machine**, sends the recognised text as an
+ordinary chat message, and PlayerEngine already hooks exactly that — no cloud, no
+API key, no quota, and no changes to this bridge at all.
 
 ```
-player talks (Simple Voice Chat client)
-  → the voice addon receives the player's microphone packets server-side
-  → Opus decoded to 48kHz mono 16-bit PCM
-  → POST /v1/stt/transcribe      (this bridge)
-  → {"text": "<transcript>"}
-  → the addon injects it with ConversationManager.onUserChatMessage(...)
-  → PlayerEngine's normal turn loop: by-name gate → command → feedback → reply
+press V and speak (mcmti, client side)
+  → Whisper runs locally (offline, no LLM, no API key)
+  → the text is sent as a NORMAL CHAT MESSAGE
+  → PlayerEngine's own chat path: Architectury ChatEvent$Received → by-name gate
+  → POST /v1/chat/completions   ← the bridge seam that already works
+  → NPC replies in text
 ```
 
-The bridge only does the transcription. Microphone capture and packet injection
-live in a separate NeoForge addon, because the stock PlayerEngine mod **cannot**
-capture audio at all — it has no microphone code (no `TargetDataLine` anywhere in
-the jar) and its own `/v1/stt/*` endpoints carry no audio.
+### Why this works with no new code
 
-### Configuration
+Verified on the rig rather than assumed. A plain chat message containing the
+companion name produced exactly the same request a `playerengine:user_message`
+packet produces — the bridge logged:
 
-| Key | Default | Meaning |
+```
+chat status=ok kind=conversation char=kilo model=nvidia/nemotron-3-super-120b-a12b:free
+  5300tok (4879in/421out) 4854ms :: "{"userMessage":"User Message: [P2KTestA]: please say hello to me"}"
+```
+
+and the NPC answered with a greeting command. Note the companion name is
+consumed by the by-name gate, so `Kilo, please say hello to me` arrives as
+`User Message: [player]: please say hello to me` — identical to typed chat.
+
+### Setup
+
+Put these three jars in the **player's** `.minecraft/mods/` folder (the client,
+not the server):
+
+| Mod | File | Why |
 |---|---|---|
-| `stt_enabled` | `true` | Master switch. When false every utterance is ignored. |
-| `stt_model` | `mistralai/voxtral-small-24b-2507` | The gateway model used for transcription. |
-| `stt_temperature` | `0.0` | Passed to the transcription call. |
-| `stt_max_seconds` | `20` | Longest utterance accepted; the bridge rejects longer audio. |
-| `stt_prompt` | *(verbatim-transcription prompt)* | Override if a model needs different wording. |
+| Microphone Text Input | `mcmti-2.2.1+1.21-neoforge.jar` | The speech mod. NeoForge, 1.21.1, MIT, client-side only. |
+| MidnightLib | `midnightlib-neoforge-1.9.3+1.21.1.jar` | Required dependency (its config GUI). |
+| Architectury API | `architectury-neoforge-13.0.11-neoforge.jar` | Required dependency. |
 
-A character may set its own `stt_model` in `bridge/characters.json` to run a
-different transcription model (see docs/CHARACTERS.md).
+Then download a **GGML Whisper model** from
+[huggingface.co/ggerganov/whisper.cpp](https://huggingface.co/ggerganov/whisper.cpp/tree/main)
+— `ggml-base.en.bin` (~75 MB) is the sensible start, `ggml-small.en.bin`
+(~460 MB) is noticeably better. Point the mod at it:
+**Mods → Microphone Text Input → GGML Whisper Model**.
 
-### The free tier cannot transcribe
+| Setting | Default | Notes |
+|---|---|---|
+| Mode | `RELEASE_KEY_TO_SEND` | Set to `AUTO_SEND` to send as soon as recognition finishes. |
+| Keybinding | `V` | Held to record, released to transcribe and send. |
+| `prefix` | `⌈Speech Input⌋` | Prepended to the recognised text. **Clear it** if you don't want it in the message the NPC sees. |
+| `vad` | off | Optional; needs the whisper-vad model. |
 
-**Measured, not assumed** (see the commit that added this). Of the 394 models on
-the gateway, 34 accept audio input; only **2 are free**, and neither works:
+It is **client-side only**, so the server needs nothing — but every player who
+wants voice needs a modded client with those three jars and a Whisper model.
+Vanilla clients cannot use it.
+
+### Server-side voice (the other path)
+
+`POST /v1/stt/transcribe` exists for a server-side alternative that would work
+for **vanilla** clients: capture the microphone in a NeoForge addon, POST the
+audio here, and inject the returned transcript. The mods themselves cannot
+capture audio — PlayerEngine has no microphone code at all (no `TargetDataLine`
+anywhere in the jar) and its own `/v1/stt/*` endpoints carry no audio, which is
+why the addon is required.
+
+It is **dormant**, because no free gateway model can actually transcribe:
 
 | Model | Result |
 |---|---|
-| `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` | Accepts the request but reports `audio_tokens: 0` in every accepted format (`input_audio` and `audio_url`) — the audio is never ingested. Replies `"(No spoken words provided)"`. |
+| `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` | Accepts the request but reports `audio_tokens: 0` in every accepted format — the audio is never ingested. |
 | `thinkingmachines/inkling-small:free` | `429 Rate limit exceeded … Daily limit reached` |
 
-So on a free-tier key the bridge logs one WARNING per utterance and returns
-`{"text": ""}`. Voice input stays inert rather than breaking anything.
+So it needs a paid key. Cheapest usable options:
 
-To actually use it you need a paid key, and the sensible choices (cheapest first)
-are:
+| Model | in / out per Mtok |
+|---|---|
+| `mistralai/voxtral-small-24b-2507` (default) | $0.10 / $0.30 — purpose-built audio model |
+| `xiaomi/mimo-v2.6-flash` | $0.10 / $0.28 |
+| `google/gemini-2.5-flash-lite` | $0.10 / $0.40 |
 
-| Model | in / out per Mtok | Note |
+**Transcription accuracy is unmeasured** for any of these. Prefer `mcmti` unless
+you specifically need vanilla clients.
+
+#### Configuration
+
+| Key | Default | Meaning |
 |---|---|---|
-| `mistralai/voxtral-small-24b-2507` | $0.10 / $0.30 | Default. Voxtral is a purpose-built audio model, not a chat model asked to transcribe. |
-| `xiaomi/mimo-v2.6-flash` | $0.10 / $0.28 | Cheapest overall. |
-| `google/gemini-2.5-flash-lite` | $0.10 / $0.40 | |
+| `stt_enabled` | `true` | Master switch for the server-side path. |
+| `stt_model` | `mistralai/voxtral-small-24b-2507` | The gateway model used for transcription. |
+| `stt_temperature` | `0.0` | Passed to the transcription call. |
+| `stt_max_seconds` | `20` | Longest utterance accepted; longer audio is rejected. |
+| `stt_prompt` | *(verbatim-transcription prompt)* | Override if a model needs different wording. |
 
-**Transcription accuracy has not been measured.** The transport is verified (a
-valid WAV reaches the model and the reply comes back), but this environment has
-no speech corpus with a known transcript and the free tier cannot generate one,
-because generating audio needs a paid model too. Measure WER against your own
-recorded fixture before trusting a model in production.
+A character may set its own `stt_model` in `bridge/characters.json` (see
+docs/CHARACTERS.md).
 
-### The fail-open contract
+#### The fail-open contract
 
 A valid request **always** returns 200. Bad input, an oversized utterance, quota
 exhaustion, a gateway error, or a model that heard nothing all return
