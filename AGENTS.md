@@ -29,6 +29,7 @@ bash scripts/build_test_rig.sh                      # rebuild the wiped MC test 
 bash scripts/start_mc.sh                            # boot NeoForge server (FIFO console; leaves it running)
 bash scripts/mc_cmd.sh <command>                    # send a server console command
 bash scripts/run_order.sh <user> "<msg>"            # drive one NPC order via the mineflayer bot
+node scripts/test_bot_framing.js                    # assert the 3-level user_message frame (no rig needed)
 ```
 
 ## Architecture facts that change how you work
@@ -49,7 +50,11 @@ bash scripts/run_order.sh <user> "<msg>"            # drive one NPC order via th
 - **Rate limiter quirk:** `TokenBucket(180)` has *burst capacity*
   `max(1, rate/60) = 3` — "3 remaining this hour" right after startup is
   correct behavior, not a bug. 180 req/hr is the only hard limiter (Kilo caps
-  free models at ~200 req/hr/IP).
+  free models at ~200 req/hr/IP). Practical consequence: a freshly started
+  bridge answers only **3** rapid chat calls before the 4th is degraded to the
+  idle envelope; it then refills one token per 20 s. One NPC turn is usually
+  several bridge calls (user message → command feedback → memory extraction), so
+  an NPC can appear to "ignore" a command for ~20 s right after a restart.
 - **Python 3.10+ stdlib only.** No pip dependencies — do not add requirements.
   Tests use `unittest`, not pytest.
 - **Config precedence for the key:** JSON `kilo_api_key` > env var named by
@@ -63,12 +68,25 @@ bash scripts/run_order.sh <user> "<msg>"            # drive one NPC order via th
   at serve time, and `bridge/characters.json` hot-reloads by mtime.
 - TLS listener binds **0.0.0.0:443** (not localhost-only) — note the firewall
   implication on internet-facing hosts.
+- **Hostname must be IDNA-safe.** All three listeners bind via
+  `build_server`, and `http.server` resolves the bind address with
+  `socket.getfqdn()`. `getfqdn` only catches `socket.error`, so a hostname whose
+  first label is longer than 63 octets (Docker's default 64-char container-id
+  hostname) makes it raise `UnicodeEncodeError` — which used to kill the whole
+  bridge at startup, with no listener at all. `_BridgeServer.server_bind` now
+  derives `server_name` straight from the bind address. Regression cover:
+  `tests.test_coverage_gaps.ServerBindHostnameTests`.
+- **Chat evidence needs a file-backed bridge log.** `test_bridge.sh` and
+  `run_order.sh` discover the bridge's stdout path through `/proc`, so start the
+  bridge with a log file (`python3 bridge/run.py ... > bridge.log 2>&1`) or the
+  `bridge_ok_call` check silently evaluates false.
 
 ## Mod endpoints the bridge must serve
 
 `/v1/chat/completions`, `/v1/health`, `/v1/selected_characters`,
 `/v1/login/web/{gameKey}`, `/v1/login/device/new` + `/token`,
-`/v1/stt/start|stop`, `/v1/tts/speak` (stubs), `/v1/minecraft/schematics/search`
+`/v1/stt/start|stop`, `/v1/tts/speak` (stubs), `/v1/joules` (always-granted
+balance, feeds the mod's own budget gate), `/v1/minecraft/schematics/search`
 (stub). Plus ops-only `GET /bridge/healthz`, `/bridge/stats` (plain HTTP, no auth).
 
 ## Environment gotchas (this sandbox)
@@ -104,10 +122,15 @@ bash scripts/run_order.sh <user> "<msg>"            # drive one NPC order via th
 - MC console via FIFO: `tail -f fifo | java` does **not** deliver input — java
   must read the FIFO directly with a background writer-holder (see
   `scripts/start_mc.sh`).
-- mineflayer bot sends `playerengine:user_message` as **nested varint byte
-  arrays** (outer `varint(len)` + inner `varint(utf8len)` + utf8); the message
-  must contain the companion name ("Kilo") for the mod's by-name gate. See
-  `scripts/bot_template.js`.
+- mineflayer bot sends `playerengine:user_message` as **three nested varint
+  frames** — `varint(outerLen) + varint(byteArrayLen) + varint(utf8Len) + utf8`
+  — and the message must contain the companion name ("Kilo") for the mod's
+  by-name gate. Only the innermost frame is read by the mod
+  (`PlayerEngine.java:178` → `FriendlyByteBuf.readUtf()`); the two outer ones are
+  stripped by Architectury's byte-array codec before the handler runs. A 2-level
+  frame fails with "Not enough bytes in buffer, expected 75, but got 31" and a
+  1-level frame with "ByteArray with size 75 is bigger than allowed 32". Verify
+  with `node scripts/test_bot_framing.js`. See `scripts/bot_template.js`.
 
 ## Testing notes
 

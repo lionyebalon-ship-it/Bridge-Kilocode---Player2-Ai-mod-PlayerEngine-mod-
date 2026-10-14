@@ -4,7 +4,9 @@ import json
 import logging
 import os
 import re
+import socketserver
 import ssl
+import sys
 import threading
 import time
 import uuid
@@ -475,6 +477,21 @@ class BridgeHandler(BaseHTTPRequestHandler):
             chars = load_characters(CFG) if CFG is not None else list(STATE.characters)
             STATE.set_characters(chars)
             self._send_json({"characters": chars})
+        elif path == "/v1/joules":
+            # PlayerEngine's JoulesCache polls this (GET) roughly once per
+            # JoulesRefreshInterval to feed its BudgetTracker soft/hard limits.
+            # The bridge is the billing authority here — the token budget and
+            # the 180 req/hr bucket are the real limits — so report an
+            # effectively unlimited balance and let those systems decide.
+            # Keys taken from JoulesCache.refresh's bytecode: joules (long),
+            # patron_tier (string), user_id (string).
+            self._send_json(
+                {
+                    "joules": sys.maxsize,
+                    "patron_tier": "",
+                    "user_id": "",
+                }
+            )
         elif path == "/":
             self._send_json({"service": SERVICE_NAME, "docs": "docs/SETUP.md"})
         else:
@@ -569,6 +586,32 @@ def _handle_server_error(request: Any, client_address: Any) -> None:
     LOG.debug("client handler error from %s", client_address)
 
 
+class _BridgeServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer that never resolves the bind address to an FQDN.
+
+    ``http.server.HTTPServer.server_bind`` calls ``socket.getfqdn(host)``.
+    ``socket.getfqdn`` only catches ``socket.error`` (an ``OSError``), but the
+    reverse lookup it performs can raise ``UnicodeEncodeError`` (a
+    ``ValueError``) when the local hostname's first label exceeds the 63-octet
+    IDNA limit — e.g. Docker's default 64-character container-id hostname.
+    That escapes uncaught and kills the bridge at startup before any listener
+    is up. The bridge never uses ``server_name`` (no redirect generation, no
+    ``Server:``-header WebDAV trickery), so deriving it from the bind address
+    is both safe and sufficient.
+    """
+
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def server_bind(self) -> None:
+        # Re-implementation of socketserver.TCPServer.server_bind +
+        # http.server.HTTPServer.server_bind, minus the getfqdn call.
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = str(host)
+        self.server_port = port
+
+
 def build_server(
     cfg: BridgeConfig,
     host: str,
@@ -577,9 +620,7 @@ def build_server(
     tls_cert: Optional[str] = None,
     tls_key: Optional[str] = None,
 ) -> ThreadingHTTPServer:
-    srv = ThreadingHTTPServer((host, int(port)), BridgeHandler)
-    srv.daemon_threads = True
-    srv.allow_reuse_address = True
+    srv = _BridgeServer((host, int(port)), BridgeHandler)
     srv.handle_error = _handle_server_error
     if tls:
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)

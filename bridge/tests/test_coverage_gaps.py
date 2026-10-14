@@ -173,6 +173,22 @@ class RouteTests(BridgeHarness):
         self.assertEqual(self.request("GET", "/nope")[0], 404)
         self.assertEqual(self.request("POST", "/nope", {"x": 1})[0], 404)
 
+    def test_joules_endpoint(self):
+        # PlayerEngine's JoulesCache GETs /v1/joules on the llm worker thread;
+        # the bridge owns the real limits (token budget + 180 req/hr bucket),
+        # so it must answer with a usable balance rather than 404.
+        self.start_bridge()
+        status, raw = self.request("GET", "/v1/joules")
+        self.assertEqual(status, 200)
+        body = json.loads(raw)
+        self.assertIsInstance(body["joules"], int)
+        self.assertGreater(body["joules"], 0)
+        self.assertIsInstance(body.get("patron_tier"), str)
+
+    def test_joules_is_not_regressed_to_404(self):
+        self.start_bridge()
+        self.assertNotEqual(self.request("GET", "/v1/joules")[0], 404)
+
     def test_device_flow_and_replay(self):
         self.start_bridge()
         status, raw = self.request("POST", "/v1/login/device/new", {"client_id": "player2-ai-npc-minecraft"})
@@ -523,6 +539,59 @@ class StartAllTests(unittest.TestCase):
             for _label, srv in servers:
                 srv.shutdown()
                 srv.server_close()
+
+
+class ServerBindHostnameTests(unittest.TestCase):
+    """Regression: the bridge must not die when the hostname is not IDNA-safe.
+
+    A host whose first FQDN label is longer than 63 octets (Docker's default
+    64-char container-id hostname, long CI hostnames, ...) makes
+    ``socket.getfqdn`` raise ``UnicodeEncodeError``, which is a ``ValueError``
+    and therefore NOT caught by getfqdn's ``except error``. Because
+    ``http.server`` resolves the bind address to an FQDN, this used to escape
+    from ``server_bind`` and kill the whole bridge at startup — no listener
+    at all, including the plain HTTP one.
+    """
+
+    def test_getfqdn_raising_does_not_kill_listener(self):
+        import socketserver as _socketserver
+
+        class Exploding:
+            def __call__(self, *a, **kw):
+                raise UnicodeEncodeError("idna", "x" * 64, 0, 64, "label too long")
+
+        real_getfqdn = socket.getfqdn
+        socket.getfqdn = Exploding()
+        try:
+            # 0.0.0.0 is where http.server substitutes gethostname(), i.e. the
+            # path that used to raise.
+            srv = server.build_server(make_cfg(), "0.0.0.0", 0)
+            try:
+                self.assertEqual(srv.server_name, "0.0.0.0")
+                # it must also actually accept connections
+                port = srv.server_address[1]
+                threading.Thread(target=srv.serve_forever, daemon=True).start()
+                conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+                try:
+                    conn.request("GET", "/v1/health")
+                    resp = conn.getresponse()
+                    self.assertEqual(resp.status, 200)
+                finally:
+                    conn.close()
+            finally:
+                srv.shutdown()
+                srv.server_close()
+            # the patched getfqdn must have been bypassed entirely
+            self.assertNotIsInstance(_socketserver.TCPServer.server_bind, Exploding)
+        finally:
+            socket.getfqdn = real_getfqdn
+
+    def test_bound_loopback_server_name_matches_address(self):
+        srv = server.build_server(make_cfg(), "127.0.0.1", 0)
+        try:
+            self.assertEqual(srv.server_name, "127.0.0.1")
+        finally:
+            srv.server_close()
 
 
 if __name__ == "__main__":

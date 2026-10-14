@@ -152,18 +152,39 @@ if grep -q 'PlayerEngine' "$BOOT_LOG" && grep -q 'player2npc' "$BOOT_LOG"; then 
 # log region for THIS run only (tail from the boot line onward)
 run_log() { tail -n +"$((LOG_START + 1))" "$BOOT_LOG" 2>/dev/null || true; }
 
-# bridge log discovery (the live bridge's stdout file, like run_order.sh does)
+# Emit the distinct regular files the given pid's stdout/stderr point at.
 collect_bridge_logs() {
   local pid="$1" fd tgt seen=""
   for fd in 1 2; do
     [[ -r "/proc/$pid/fd/$fd" ]] || continue
     tgt="$(readlink "/proc/$pid/fd/$fd" 2>/dev/null || true)"
     case "$tgt" in
-      /*) if [[ -f "$tgt" ]]; then case " $seen " in *" $tgt "*) : ;; *) seen="$seen $tgt"; echo "$tgt" ;; esac; fi ;;
+      /*) if [[ -f "$tgt" ]]; then
+            case " $seen " in *" $tgt "*) : ;; *) seen="$seen $tgt"; echo "$tgt" ;; esac
+          fi ;;
     esac
   done
 }
-BRIDGE_PID="$(pgrep -f 'bridge/run\.py' | head -n1 || true)"
+
+# bridge log discovery (the live bridge's stdout file, like run_order.sh does).
+# `pgrep -f 'bridge/run\.py'` also matches the wrapper shell that launched the
+# bridge (bash -c "python3 bridge/run.py ...") and, worse, any *current* shell
+# whose command line merely mentions the pattern — including this script's own
+# command substitution. Selecting that process yields no file-backed stdout and
+# silently disables every bridge-log evidence check below, so prefer the
+# process whose comm is a python interpreter and fall back to the first match.
+bridge_pid() {
+  local pid comm first=""
+  for pid in $(pgrep -f 'bridge/run\.py' 2>/dev/null); do
+    [[ "$pid" == "$$" ]] && continue
+    comm="$(cat "/proc/$pid/comm" 2>/dev/null || echo '')"
+    case "$comm" in
+      python*|java*) [[ -z "$first" ]] && first="$pid" ;;
+    esac
+  done
+  if [[ -n "$first" ]]; then echo "$first"; else pgrep -f 'bridge/run\.py' | head -n1; fi
+}
+BRIDGE_PID="$(bridge_pid || true)"
 BRIDGE_LOG_FILE=""
 if [[ -n "$BRIDGE_PID" ]]; then
   for f in $(collect_bridge_logs "$BRIDGE_PID"); do BRIDGE_LOG_FILE="$f"; done
@@ -210,7 +231,14 @@ run_order() { # run_order <label> <username> <message> <watch-seconds> <grep-nee
   grep -q 'INVENTORY CHANGE' "$out" 2>/dev/null && inv_change=1
   run_log | grep -q 'LLMCompleter returned json' && llm=1
   run_log | grep -q 'Command feedback' && feedback=1
-  bridge_grep "status=ok" | grep -q "$needle" && bridge_ok=1
+  # The bridge logs one status line per call, but the message preview is
+  # truncated to 60 chars (p2k_bridge.state.PREVIEW_MAXLEN) — an order keyword
+  # like "oak logs" almost always falls past that cut, so grep-ing the needle
+  # here reported a false negative even when the bridge had answered. What this
+  # flag means is "did the bridge log a successful chat call for this run", so
+  # match on the status itself; llm_json/command_feedback below already prove
+  # the round-trip and its in-game effect against the untruncated server log.
+  bridge_grep 'chat status=ok' | grep -q 'status=ok' && bridge_ok=1
   run_log | grep -qi "$needle" && exec_line=1
 
   echo "  evidence: bot_sent=$bot_sent bot_received=$bot_msg inventory_change=$inv_change llm_json=$llm command_feedback=$feedback bridge_ok_call=$bridge_ok"

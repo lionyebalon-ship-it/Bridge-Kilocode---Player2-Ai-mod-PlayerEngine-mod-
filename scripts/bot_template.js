@@ -14,11 +14,26 @@
 //                 by-name chat gate; the message is prefixed if it lacks it)
 //
 // The C2S payload framing is the tricky part, proven against NeoForge 1.21.1 +
-// Architectury: the mod reads a ByteBufCodecs.BYTE_ARRAY (varint length +
-// bytes) whose CONTENT is another length-prefixed UTF-8 string. So the
-// payload is varint(len(inner)) + inner, inner = varint(utf8ByteLength) + utf8.
-// (A single-level wrapper fails with "Not enough bytes in buffer" — the
-// receiver has already consumed the inner varint.)
+// Architectury 13.0.11 by inspecting the actual mod bytecode
+// (PlayerEngine.lambda$onInitialize$4 -> FriendlyByteBuf.readUtf) and by
+// bin-labelling the DecoderExceptions the server reports:
+//
+//   * a 2-level frame (varint(len) + varint(utf8len) + utf8) fails with
+//     "Not enough bytes in buffer, expected 75, but got 31"
+//   * a 1-level frame (varint(utf8len) + utf8) fails with
+//     "ByteArray with size 75 is bigger than allowed 32"
+//
+// Both read the length off the first byte of the message text ('K' = 75),
+// which means the two length prefixes before it are already consumed by the
+// network stack (Architectury's byte-array codec in
+// NetworkAggregator.registerC2SReceiver$3), leaving the mod exactly ONE
+// readUtf length to read. So the wire format is THREE nested varint frames:
+//
+//   varint(outerLen) + varint(byteArrayLen) + varint(utf8Len) + utf8
+//                    ^ dispatcher strips     ^ Architectury      ^ mod readUtf
+//
+// With that, the server logs "Server: received user_message packet (voice/STT)
+// from <user> len=32 preview=..." and the order reaches the LLM.
 
 const COMPANION_NAME = process.env.KILO_NAME || 'Kilo';
 const username = process.argv[2];
@@ -58,11 +73,13 @@ function writeVarint(value) {
   return Buffer.from(out);
 }
 
-// Nested length-prefixed payload for the 'playerengine:user_message' channel.
+// Triple-nested length-prefixed payload for 'playerengine:user_message'.
+// See the framing note above for why exactly three levels are required.
 function buildUserMessagePayload(text) {
   const msg = Buffer.from(text, 'utf8');
-  const inner = Buffer.concat([writeVarint(msg.length), msg]);
-  return Buffer.concat([writeVarint(inner.length), inner]);
+  const utf8Framed = Buffer.concat([writeVarint(msg.length), msg]);     // level 3: mod's readUtf
+  const byteArrayFramed = Buffer.concat([writeVarint(utf8Framed.length), utf8Framed]); // level 2: Architectury
+  return Buffer.concat([writeVarint(byteArrayFramed.length), byteArrayFramed]);        // level 1: dispatcher
 }
 
 // Find the raw protocol client. mineflayer 4.x moved it to bot._client; 3.x

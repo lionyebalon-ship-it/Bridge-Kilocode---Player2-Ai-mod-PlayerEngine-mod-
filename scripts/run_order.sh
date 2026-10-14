@@ -54,9 +54,22 @@ echo "=== bot log tail ($BOT_LOG, exit=$BOT_RC) ==="
 tail -n 30 "$BOT_LOG" 2>/dev/null || true
 
 # --- bridge chat log lines (discover the live bridge log via ps) ---------
+# `pgrep -f 'bridge/run\.py'` also matches the wrapper shell that launched the
+# bridge (bash -c "python3 bridge/run.py ..."), whose stdout is a socket/pipe
+# rather than the bridge's own log file — picking it silently yields no log.
+# Prefer the process whose comm is a python interpreter.
+bridge_pid() {
+  local pid comm first=""
+  for pid in $(pgrep -f 'bridge/run\.py' 2>/dev/null); do
+    [[ "$pid" == "$$" ]] && continue
+    comm="$(cat "/proc/$pid/comm" 2>/dev/null || echo '')"
+    case "$comm" in python*|java*) [[ -z "$first" ]] && first="$pid" ;; esac
+  done
+  if [[ -n "$first" ]]; then echo "$first"; else pgrep -f 'bridge/run\.py' | head -n1; fi
+}
 echo
 echo "=== bridge chat log (live) ==="
-BRIDGE_PID="$(pgrep -f 'bridge/run\.py' | head -n1 || true)"
+BRIDGE_PID="$(bridge_pid || true)"
 if [[ -z "$BRIDGE_PID" ]]; then
   BRIDGE_PID="$(pgrep -f 'run\.py' | head -n1 || true)"
 fi
