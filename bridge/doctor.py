@@ -40,7 +40,7 @@ REPO_ROOT = BRIDGE_DIR.parent
 if str(BRIDGE_DIR) not in sys.path:
     sys.path.insert(0, str(BRIDGE_DIR))
 
-from p2k_bridge.config import _parse_env_file, load_config  # noqa: E402
+from p2k_bridge.config import _parse_env_file, is_placeholder_key, load_config  # noqa: E402
 
 try:  # the server module owns roster resolution (characters.json hot reload)
     import server  # noqa: E402
@@ -319,13 +319,13 @@ def _dotenv_lookup(path: Path, name: str) -> str:
 
 
 def _is_placeholder(value: str) -> bool:
-    text = (value or "").strip()
-    if not text:
-        return True
-    if text == ENV_PLACEHOLDER:
-        return True
-    lowered = text.lower()
-    return lowered.startswith("paste-your") or "your-kilocode" in lowered
+    """Delegate to the bridge's own notion of a placeholder.
+
+    Keeping the copy here is what let it drift out of sync with the runtime:
+    the doctor correctly reported the placeholder while ``load_config`` happily
+    sent it to the gateway on every call.
+    """
+    return is_placeholder_key(value)
 
 
 def _keytool_list_argv(keytool: str, cacerts: Any, alias: str, storepass: str) -> list[str]:

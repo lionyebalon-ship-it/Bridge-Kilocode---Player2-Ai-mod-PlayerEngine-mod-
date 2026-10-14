@@ -116,9 +116,22 @@ balance, feeds the mod's own budget gate), `/v1/minecraft/schematics/search`
 
 ## Environment gotchas (this sandbox)
 
-- **Untracked files get wiped periodically** — `.env`, `tls/certs/`, git
-  history, and the whole MC rig have all been destroyed mid-session multiple
-  times. Commit early; recover runtime artifacts with `bash bootstrap.sh`.
+- **Untracked files get wiped periodically** — but this is *selective*, not a
+  filesystem rollback: gitignored files (`.env`, `tls/certs/`, `*.log`), anything
+  outside the repo (`/workspace/mc-test`), and installed packages have all been
+  destroyed mid-session, while the 45 tracked repo files survived every time.
+  There is no persistent volume to appeal to — the whole sandbox is one btrfs
+  subvolume (`subvol=/rootfs`), and `/etc/hosts`, `/etc/hostname` and
+  `/etc/resolv.conf` are container-injected overlays — so **the only reliable
+  persistence is a committed file**. `bash bootstrap.sh` restores everything else
+  and now does the work rather than just reporting it: it regenerates certs,
+  installs python3 (and the JDK with `P2K_INSTALL_JDK=1`), imports the
+  TLS-intercepting proxy's CA, writes the `/etc/hosts` entry, and exits with
+  `0 items need attention` — after which `python3 bridge/run.py` alone brings the
+  bridge back up. Commit early; re-run bootstrap after each wipe and then run the
+  E2E suite (`scripts/test_bridge.sh`), because the rig at `/workspace/mc-test`
+  is gone and must be rebuilt with `scripts/build_test_rig.sh`.
+- **Pushing to origin** — `git push origin <branch>:main` normally just works.
 - **Pushing to origin** — `git push origin <branch>:main` normally just works.
   If it fails with `502 SCM authorization unavailable` (the sandbox's SCM-auth
   proxy outage; the `origin` URL holds a short-lived `kcp1.` token), push with
@@ -134,11 +147,20 @@ balance, feeds the mod's own budget gate), `/v1/minecraft/schematics/search`
   with `scripts/build_test_rig.sh` (NeoForge 21.1.201, Java 21, mods:
   PlayerEngine/Player2NPC 1.4.0 + Architectury via Modrinth IDs `nUOXthgN`,
   `CB68UWRl`, `lhGA9TYQ`).
-- Outbound HTTPS goes through a TLS-intercepting proxy: if `api.kilo.ai` fails
-  with "self-signed in chain", add `/etc/cloudflare/certs/*.crt` to the system
-  store (`/usr/local/share/ca-certificates/` + `update-ca-certificates`).
-- `/etc/hosts` needs `127.0.0.1 api.player2.game` (may be mounted read-only:
-  `mount -o remount,rw /etc/hosts` first).
+- Outbound HTTPS goes through a TLS-intercepting proxy. If `api.kilo.ai` fails
+  with "self-signed in chain" the bridge logs
+  `model catalog unavailable` at startup: it still serves chat, but without the
+  catalog it cannot read per-model context windows or validate a character's
+  model and silently falls back to the global limits. Fix import the proxy's CA
+  (bootstrap.sh step [3/7] does this):
+  `cp /etc/cloudflare/certs/*.crt /usr/local/share/ca-certificates/ &&
+  update-ca-certificates`.
+- `/etc/hosts` needs `127.0.0.1 api.player2.game`. It is a read-only container
+  overlay and **`mount -o remount,rw` does not work** — the fix that does is to
+  replace the mount: `cp /etc/hosts /tmp/h && echo '127.0.0.1 api.player2.game'
+  >> /tmp/h && umount /etc/hosts && mount --bind /tmp/h /etc/hosts`. This is
+  session-local, so it must be redone after each wipe (bootstrap.sh step [6/7]
+  does it automatically).
 - Port 443 needs root, or set `"tls_port": 8443` + `sudo iptables -t nat -A
   OUTPUT -p tcp -d 127.0.0.1 --dport 443 -j REDIRECT --to-port 8443`.
 - **Server JVM and each MC client JVM are different trust stores** — run

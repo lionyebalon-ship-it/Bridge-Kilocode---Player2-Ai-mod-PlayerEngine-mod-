@@ -441,5 +441,89 @@ class ApiKeyPrecedenceTests(unittest.TestCase):
         self.assertEqual(cfg.kilo_api_key, "FAKE_KEY_FROM_ENV")  # env value stripped
 
 
+class PlaceholderKeyTests(unittest.TestCase):
+    """The placeholder .env bootstrap.sh writes must not be used as a key.
+
+    Regression: after an environment wipe the bridge started fine, sent every
+    chat call with the placeholder, got 401 INVALID_TOKEN back on each one, and
+    every NPC silently degraded to the idle envelope. The bridge looked healthy
+    and did nothing.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        self.config_dir = self.root / "config-dir"
+        self.config_dir.mkdir()
+
+    def _write_config(self, data):
+        return _write_json(self.config_dir / "config.json", data)
+
+    def _write_dotenv(self, text):
+        (self.config_dir / ".env").write_text(text, encoding="utf-8")
+
+    def _clear_env(self, **values):
+        patcher = mock.patch.dict(os.environ, values, clear=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _load(self, **config_overrides):
+        data = {"kilo_api_key": "", "kilo_api_key_env": GAP_KEY}
+        data.update(config_overrides)
+        return load_config(str(self._write_config(data)))
+
+    PLACEHOLDER = "paste-your-kilocode-api-key-here"
+
+    def test_placeholder_in_dotenv_resolves_to_no_key(self):
+        self._clear_env()
+        self._write_dotenv(f"{GAP_KEY}={self.PLACEHOLDER}\n")
+        cfg = self._load()
+        self.assertEqual(cfg.kilo_api_key, "")
+
+    def test_placeholder_in_dotenv_with_the_default_name(self):
+        # This is the exact state bootstrap.sh leaves behind after a wipe:
+        # the default env-var name, the placeholder value.
+        self._clear_env()
+        self._write_dotenv(f"KILO_API_KEY={self.PLACEHOLDER}\n")
+        cfg = self._load(kilo_api_key_env="")
+        self.assertEqual(cfg.kilo_api_key, "")
+
+    def test_placeholder_variants_are_detected(self):
+        for variant in (
+            self.PLACEHOLDER,
+            "  paste-your-kilocode-api-key-here  ",
+            "paste-your-own-key-here",
+            "your-kilocode-api-key",
+        ):
+            self.assertTrue(cfgmod.is_placeholder_key(variant), variant)
+
+    def test_real_key_is_not_mistaken_for_a_placeholder(self):
+        for real in ("sk-lf-abc123", "kcp1.SHORT.LIVED.token", "KILO_API", ""):
+            expected = not real.strip()
+            self.assertEqual(cfgmod.is_placeholder_key(real), expected, real)
+
+    def test_placeholder_in_dotenv_does_not_shadow_a_real_env_var(self):
+        # Precedence must still hold: a usable higher-precedence key wins.
+        self._clear_env(**{GAP_KEY: "REAL_KEY_FROM_ENV"})
+        self._write_dotenv(f"KILO_API_KEY={self.PLACEHOLDER}\n")
+        self.assertEqual(self._load().kilo_api_key, "REAL_KEY_FROM_ENV")
+
+    def test_placeholder_in_config_json_does_not_shadow_env_var(self):
+        self._clear_env(**{GAP_KEY: "REAL_KEY_FROM_ENV"})
+        cfg = self._load(kilo_api_key=self.PLACEHOLDER)
+        self.assertEqual(cfg.kilo_api_key, "REAL_KEY_FROM_ENV")
+
+    def test_real_dotenv_key_still_wins_over_nothing(self):
+        self._clear_env()
+        self._write_dotenv(f"{GAP_KEY}=REAL_KEY_FROM_DOTENV\n")
+        self.assertEqual(self._load().kilo_api_key, "REAL_KEY_FROM_DOTENV")
+
+    def test_config_json_key_still_wins_over_env_var(self):
+        self._clear_env(**{GAP_KEY: "REAL_KEY_FROM_ENV"})
+        cfg = self._load(kilo_api_key="REAL_KEY_FROM_JSON")
+        self.assertEqual(cfg.kilo_api_key, "REAL_KEY_FROM_JSON")
+
+
 if __name__ == "__main__":
     unittest.main()

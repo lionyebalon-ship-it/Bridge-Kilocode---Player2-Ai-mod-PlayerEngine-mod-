@@ -5,7 +5,7 @@ import json
 import os
 from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 DEFAULT_CHARACTER: dict[str, Any] = {
     "id": "kilo",
@@ -241,14 +241,48 @@ def load_config(path: str | None = None) -> BridgeConfig:
 
     cfg = BridgeConfig(**kwargs)
 
-    if not cfg.kilo_api_key.strip():
-        env_name = (cfg.kilo_api_key_env or "KILO_API_KEY").strip() or "KILO_API_KEY"
-        env_value = (os.environ.get(env_name) or "").strip()
-        if env_value:
-            cfg.kilo_api_key = env_value
-        else:
-            file_value = _dotenv_value(config_path, env_name)
-            if file_value:
-                cfg.kilo_api_key = file_value
-
+    cfg.kilo_api_key = _resolve_api_key(cfg, config_path)
     return cfg
+
+
+_KEY_PLACEHOLDER = "paste-your-kilocode-api-key-here"
+
+
+def is_placeholder_key(value: Any) -> bool:
+    """True when an API key is absent or is still the shipped placeholder.
+
+    ``bootstrap.sh`` recreates ``.env`` from ``.env.example`` after an
+    environment wipe, so the placeholder is the *normal* state right after a
+    restore. Treating it as a real key previously meant every chat call was sent
+    with it, the gateway answered ``401 INVALID_TOKEN`` on each one, and every
+    NPC silently degraded to the idle envelope — a bridge that looks healthy and
+    does nothing. Ignoring the placeholder lets the bridge use the anonymous
+    free tier instead.
+    """
+    text = value.strip() if isinstance(value, str) else ""
+    if not text:
+        return True
+    if text == _KEY_PLACEHOLDER:
+        return True
+    lowered = text.lower()
+    return lowered.startswith("paste-your") or "your-kilocode" in lowered
+
+
+def _resolve_api_key(cfg: BridgeConfig, config_path: Optional[str]) -> str:
+    """First usable key in precedence order, skipping placeholders.
+
+    Order is: the JSON value, the environment variable named by
+    ``kilo_api_key_env``, then the ``.env`` files. A placeholder at a higher
+    precedence does not shadow a real key lower down, and a placeholder at every
+    level resolves to "" (free tier) rather than to the placeholder itself.
+    """
+    env_name = (cfg.kilo_api_key_env or "KILO_API_KEY").strip() or "KILO_API_KEY"
+    candidates = (
+        cfg.kilo_api_key,
+        os.environ.get(env_name) or "",
+        _dotenv_value(config_path, env_name) or "",
+    )
+    for candidate in candidates:
+        if not is_placeholder_key(candidate):
+            return candidate.strip()
+    return ""
