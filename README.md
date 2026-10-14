@@ -188,6 +188,13 @@ hot-reload rules) are collected in **AGENTS.md**.
   character; both are recorded in `/bridge/stats`. Classification is currently
   observability only — it changes no routing behaviour.
 - TTS/STT stubbed (no audio in this version).
+- **Voice in for NPCs**: `POST /v1/stt/transcribe` transcribes microphone audio
+  and the addon injects it through PlayerEngine's normal turn loop, so voice
+  drives the same commands as typed chat. The stock mods cannot capture audio,
+  so capture and injection live in a separate Simple Voice Chat addon. No free
+  gateway model can actually transcribe yet — on a free key every utterance
+  degrades to `{"text": ""}` — so a paid key is required for voice to speak.
+  Details and measured evidence: **docs/SETUP.md → Voice input**.
 - `max_tokens` = 500,000 per call, clamped per request to the target model's
   context window and completion cap (the token budget per window is disabled —
   tracking only), with a 180 req/hr cap as the only hard limiter; both are

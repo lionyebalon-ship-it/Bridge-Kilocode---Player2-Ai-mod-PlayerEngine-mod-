@@ -122,7 +122,8 @@ The mods still believe they are talking to the Player2 platform. The bridge answ
 | GET `/v1/selected_characters` | Served from `bridge/characters.json` when present, else from `bridge/config.json`; hot-reloaded on change |
 | POST `/v1/login/web/{gameKey}` | Instant p2Key (served by both the 4315 shim and the TLS listener) |
 | POST `/v1/login/device/new` + `/token` | Device flow answered locally (same routes on both listeners) |
-| POST `/v1/stt/start` / `/v1/stt/stop` | Stubbed (empty text) |
+| POST `/v1/stt/start` / `/v1/stt/stop` | The mods' own STT protocol. Stubbed, and deliberately left that way — see **Voice input** below |
+| POST `/v1/stt/transcribe` | Speech-to-text for the voice addon. Returns `{"text": "..."}`; never a non-200 |
 | POST `/v1/tts/speak` | No-op stub |
 | POST `/v1/minecraft/schematics/search` | Stub returning `{"results": [], "schematicInfos": []}` (schematics disabled, logged) |
 | GET `/` | Service fingerprint |
@@ -142,6 +143,75 @@ Ops visibility: `GET /bridge/stats` embeds `token_budget` + `requests {limit_per
   ```
   Shows requests remaining this hour + refill rate, the counters (`chat_requests/ok/failed`, `rate_limited`, `kilo_errors`, bytes up), token usage (window + lifetime, with the disabled-budget note), and a recent-requests table (time, status, in/out/total tokens, ms, preview — at most 10 rows live, ≤20 in the JSON).
 - `curl -s http://127.0.0.1:9800/bridge/stats` — JSON keys: `started_at`, `uptime_seconds`, `chat_requests`, `chat_ok`, `chat_failed`, `kilo_errors`, `rate_limited`, `bytes_up`, `bytes_down` (always 0 — request bytes only), `recent_requests`, `token_budget`, `requests`.
+## Voice input
+
+NPCs can be driven by speech. The flow is:
+
+```
+player talks (Simple Voice Chat client)
+  → the voice addon receives the player's microphone packets server-side
+  → Opus decoded to 48kHz mono 16-bit PCM
+  → POST /v1/stt/transcribe      (this bridge)
+  → {"text": "<transcript>"}
+  → the addon injects it with ConversationManager.onUserChatMessage(...)
+  → PlayerEngine's normal turn loop: by-name gate → command → feedback → reply
+```
+
+The bridge only does the transcription. Microphone capture and packet injection
+live in a separate NeoForge addon, because the stock PlayerEngine mod **cannot**
+capture audio at all — it has no microphone code (no `TargetDataLine` anywhere in
+the jar) and its own `/v1/stt/*` endpoints carry no audio.
+
+### Configuration
+
+| Key | Default | Meaning |
+|---|---|---|
+| `stt_enabled` | `true` | Master switch. When false every utterance is ignored. |
+| `stt_model` | `mistralai/voxtral-small-24b-2507` | The gateway model used for transcription. |
+| `stt_temperature` | `0.0` | Passed to the transcription call. |
+| `stt_max_seconds` | `20` | Longest utterance accepted; the bridge rejects longer audio. |
+| `stt_prompt` | *(verbatim-transcription prompt)* | Override if a model needs different wording. |
+
+A character may set its own `stt_model` in `bridge/characters.json` to run a
+different transcription model (see docs/CHARACTERS.md).
+
+### The free tier cannot transcribe
+
+**Measured, not assumed** (see the commit that added this). Of the 394 models on
+the gateway, 34 accept audio input; only **2 are free**, and neither works:
+
+| Model | Result |
+|---|---|
+| `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` | Accepts the request but reports `audio_tokens: 0` in every accepted format (`input_audio` and `audio_url`) — the audio is never ingested. Replies `"(No spoken words provided)"`. |
+| `thinkingmachines/inkling-small:free` | `429 Rate limit exceeded … Daily limit reached` |
+
+So on a free-tier key the bridge logs one WARNING per utterance and returns
+`{"text": ""}`. Voice input stays inert rather than breaking anything.
+
+To actually use it you need a paid key, and the sensible choices (cheapest first)
+are:
+
+| Model | in / out per Mtok | Note |
+|---|---|---|
+| `mistralai/voxtral-small-24b-2507` | $0.10 / $0.30 | Default. Voxtral is a purpose-built audio model, not a chat model asked to transcribe. |
+| `xiaomi/mimo-v2.6-flash` | $0.10 / $0.28 | Cheapest overall. |
+| `google/gemini-2.5-flash-lite` | $0.10 / $0.40 | |
+
+**Transcription accuracy has not been measured.** The transport is verified (a
+valid WAV reaches the model and the reply comes back), but this environment has
+no speech corpus with a known transcript and the free tier cannot generate one,
+because generating audio needs a paid model too. Measure WER against your own
+recorded fixture before trusting a model in production.
+
+### The fail-open contract
+
+A valid request **always** returns 200. Bad input, an oversized utterance, quota
+exhaustion, a gateway error, or a model that heard nothing all return
+`{"text": ""}`, which the addon treats as "nothing was said" and the NPC simply
+ignores. This matters because the caller runs on Simple Voice Chat's packet
+processing thread, where a thrown exception would disrupt voice chat for **every**
+player, not just the speaker. The same contract the chat endpoint already honours.
+
 ## Characters
 
 The NPC roster lives in `bridge/characters.json` (`{"characters":[{id, name, short_name, greeting, description, voice_ids, meta:{skin_url}}]}`) and hot-reloads without restarting the bridge — changes appear the next time the in-game H menu is opened.

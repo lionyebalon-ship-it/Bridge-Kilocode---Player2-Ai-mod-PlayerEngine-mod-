@@ -60,12 +60,13 @@ away."*
 
 ## Per-character model overrides
 
-Three optional keys let a character run a different brain than the rest of the
+Four optional keys let a character run a different brain than the rest of the
 server. All of them default to the global values in `bridge/config.json`.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `model` | string | global `model` | Any id listed by `python3 bridge/run.py --check`. |
+| `stt_model` | string | global `stt_model` | The transcription model for this character's voice input. Must be an audio-input model, and only paid ones work — see **docs/SETUP.md → Voice input**. |
 | `temperature` | float `0.0`–`2.0` | global `temperature` | |
 | `max_tokens` | int `> 0` | global `max_tokens` | Clamped against the target model's own context window and completion cap. |
 

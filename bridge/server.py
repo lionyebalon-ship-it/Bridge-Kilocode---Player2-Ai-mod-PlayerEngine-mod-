@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import unquote
 
+from p2k_bridge import stt
 from p2k_bridge.budget import TokenBudget
 from p2k_bridge.catalog import ModelCatalog
 from p2k_bridge.config import BridgeConfig
@@ -28,6 +29,10 @@ SERVICE_NAME = "p2k-bridge"
 SERVICE_VERSION = "1.0.0"
 MAX_BODY_BYTES = 1024 * 1024
 _P2K_KEY = "p2k-local"
+# Mirrors the line the mod writes into the NPC's system prompt, so an audio
+# payload attributed to a character resolves through routing exactly as a typed
+# message from that character would.
+SYSTEM_NAME_LINE = "Your character's name is %s."
 
 ACCESS_LOG = logging.getLogger("p2k.access")
 LOG = logging.getLogger("p2k.bridge")
@@ -578,6 +583,152 @@ class BridgeHandler(BaseHTTPRequestHandler):
             _record_chat("kilo_error", t0, 0, 0, 0, preview, route)
             self._send_json(to_openai_envelope({"reason": "kilo unavailable", "command": "", "message": ""}))
 
+    # --- speech to text ------------------------------------------------------
+
+    def _handle_stt(self, body: bytes) -> None:
+        """``POST /v1/stt/transcribe`` -- voice-in for the NPC addon.
+
+        Contract with the caller (the NeoForge addon on the voice-chat thread):
+
+        * A valid request always returns 200. Every failure -- bad input, quota,
+          gateway error, or an STT model that reports no speech -- returns
+          ``{"text": ""}`` so the caller simply injects nothing and the NPC
+          ignores the utterance. It must never throw inside the voice thread,
+          where an exception would disrupt voice chat for every player.
+        * ``text`` is the key the mod itself reads first
+          (PlayerEngine ``STTUtils.extractTranscriptText``), so this mirrors it.
+
+        Model choice comes from ``routing.resolve_route`` applied to the audio
+        payload, which gives per-character ``stt_model`` overrides the same way
+        chat does.
+        """
+        t0 = time.monotonic()
+        data = self._parse_json_object(body)
+        try:
+            request = stt.parse_audio_request(data if data is not None else {}, self._cfg())
+            model = self._stt_model(data if isinstance(data, dict) else {})
+        except stt.SttError as exc:
+            LOG.warning("stt rejected: %s", exc)
+            STATE.increment("stt_failed")
+            self._record_stt("bad_request", t0, None, "", exc)
+            self._send_json(stt.transcript_reply(""))
+            return
+
+        if not getattr(CFG, "stt_enabled", True):
+            LOG.info("stt disabled by config (stt_enabled=false); utterance ignored")
+            self._record_stt("disabled", t0, request, model, "stt_enabled=false")
+            self._send_json(stt.transcript_reply(""))
+            return
+
+        preview = f"{request.seconds:.1f}s audio from {request.player or request.player_uuid or '?'}"
+        STATE.increment("stt_requests")
+        STATE.increment("bytes_up", len(body))
+        if BUCKET is None or not BUCKET.try_acquire():
+            STATE.increment("stt_rate_limited")
+            cap = CFG.requests_per_hour if CFG is not None else 0
+            LOG.warning("stt rate limited (%s req/hour exhausted); utterance ignored", cap)
+            self._record_stt("rate_limited", t0, request, model, "quota")
+            self._send_json(stt.transcript_reply(""))
+            return
+
+        try:
+            if KILO is None:
+                raise KiloError("kilo client not initialized")
+            resp = KILO._request(
+                "POST",
+                f"{KILO._base_url}/chat/completions",
+                stt.build_request(request, self._cfg(), model),
+            )
+        except KiloError as exc:
+            STATE.increment("stt_failed")
+            STATE.increment("kilo_errors")
+            # Warning, not error: a paid STT model with no key, or a model with
+            # no audio endpoint, is an expected state on the free tier.
+            LOG.warning("stt unavailable (%s); utterance ignored", exc)
+            self._record_stt("kilo_unavailable", t0, request, model, str(exc))
+            self._send_json(stt.transcript_reply(""))
+            return
+        except Exception as exc:  # pragma: no cover - defensive
+            STATE.increment("stt_failed")
+            LOG.warning("stt unexpected failure: %s", exc)
+            self._record_stt("kilo_unavailable", t0, request, model, str(exc))
+            self._send_json(stt.transcript_reply(""))
+            return
+
+        text = stt.extract_transcript(resp)
+        if not text:
+            STATE.increment("stt_no_speech")
+            LOG.info("stt returned no usable transcript (%s)", preview)
+            self._record_stt("no_speech", t0, request, model, preview)
+            self._send_json(stt.transcript_reply(""))
+            return
+
+        STATE.increment("stt_ok")
+        STATE.increment("bytes_down", 0)
+        LOG.info(
+            'stt status=ok kind=stt char=%s model=%s %.1fs %dms :: "%s"',
+            request.character_id or "-",
+            model,
+            request.seconds,
+            int((time.monotonic() - t0) * 1000),
+            _chat_preview([{"role": "user", "content": text}]),
+        )
+        self._record_stt("ok", t0, request, model, text)
+        self._send_json(stt.transcript_reply(text))
+
+    def _cfg(self) -> BridgeConfig:
+        return CFG if CFG is not None else BridgeConfig()
+
+    def _stt_model(self, data: dict) -> str:
+        """Resolve the STT model for this utterance via the routing layer."""
+        character_id = data.get("character_id") if isinstance(data, dict) else ""
+        try:
+            chars = roster()
+        except Exception:  # pragma: no cover - defensive
+            chars = []
+        if isinstance(character_id, str) and character_id.strip():
+            # Attribute to the named character so its overrides apply. The audio
+            # payload itself cannot identify a character, so trust the caller.
+            # Reload rather than read the cached roster: characters.json may have
+            # gained an stt_model override since the character was spawned.
+            messages = [{"role": "system", "content": SYSTEM_NAME_LINE % character_id.strip()}]
+            try:
+                chars = load_characters(self._cfg())
+            except Exception:  # pragma: no cover - defensive
+                chars = roster()
+            route = resolve_route(messages, chars, self._cfg(), CATALOG)
+            if route is not None and route.stt_model:
+                return route.stt_model
+        return getattr(self._cfg(), "stt_model", "") or ""
+
+    def _record_stt(
+        self,
+        status: str,
+        t0: float,
+        request: Any,
+        model: str,
+        reason: Any,
+    ) -> None:
+        """Journal one STT call and emit its single INFO/WARNING line."""
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        seconds = float(getattr(request, "seconds", 0.0) or 0.0)
+        STATE.record_request(
+            status=status,
+            duration_ms=duration_ms,
+            preview=_chat_preview([{"role": "user", "content": str(reason)[:400]}]),
+            kind="stt",
+            character_id=getattr(request, "character_id", "") if request is not None else "",
+            model=model or "",
+        )
+        LOG.info(
+            "stt status=%s kind=stt model=%s %.1fs %dms :: %s",
+            status,
+            model or "-",
+            seconds,
+            duration_ms,
+            str(reason)[:300],
+        )
+
     def _route_get(self, path: str) -> None:
         if path == "/bridge/healthz":
             self._send_json(self._healthz())
@@ -621,6 +772,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
     def _route_post(self, path: str, body: bytes) -> None:
         if path == "/v1/chat/completions":
             self._handle_chat(body)
+            return
+        if path == "/v1/stt/transcribe":
+            self._handle_stt(body)
             return
         if path == "/v1/login/device/new":
             data = self._parse_json_object(body)

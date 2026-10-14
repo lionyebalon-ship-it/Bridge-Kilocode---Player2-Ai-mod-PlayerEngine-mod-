@@ -15,7 +15,7 @@ DEFAULT_CHARACTER: dict[str, Any] = {
     "description": "You are a helpful, concise Minecraft companion AI agent.",
     "voice_ids": [],
     "meta": {"skin_url": ""},
-    # Optional per-character model overrides. Empty/zero = inherit the global
+    # Optional per-character model overrides. Empty/zero/None = inherit the global
     # values in bridge/config.json. There is deliberately no
     # `model_context_limit` key: the context window is read from the gateway
     # catalog (p2k_bridge.catalog), because a hand-entered value that does not
@@ -23,6 +23,7 @@ DEFAULT_CHARACTER: dict[str, Any] = {
     "model": "",
     "temperature": None,
     "max_tokens": 0,
+    "stt_model": "",
 }
 
 DEFAULT_CHARACTERS: list[dict] = [copy.deepcopy(DEFAULT_CHARACTER)]
@@ -53,6 +54,23 @@ class BridgeConfig:
     model_context_limit: int = 262144
     game_key: str = "player2-ai-npc-minecraft"
     characters: list[dict] = field(default_factory=lambda: [copy.deepcopy(DEFAULT_CHARACTER)])
+
+    # Speech-to-text (voice input for NPCs). The endpoint is model-agnostic; the
+    # default model is the cheapest purpose-built audio model on the gateway and
+    # needs a paid Kilo key. There is no working free audio model today — the two
+    # the catalog advertises either report audio_tokens=0 (audio never ingested)
+    # or have no audio endpoint at all — so on the free tier every call degrades
+    # to {"text": ""} and the NPC simply ignores the utterance. See docs/SETUP.md.
+    stt_enabled: bool = True
+    stt_model: str = "mistralai/voxtral-small-24b-2507"
+    stt_temperature: float = 0.0
+    stt_max_seconds: float = 20.0
+    stt_prompt: str = (
+        "Transcribe the following speech exactly. Reply with ONLY the words that "
+        "were spoken -- no commentary, no summary, no quotation marks, and no "
+        "apology if the audio is unclear."
+    )
+    routing_rules: list[dict] = field(default_factory=list)
 
     def __repr__(self) -> str:
         parts = []
@@ -89,7 +107,7 @@ def _coerce_characters(value: Any) -> list[dict] | None:
 # Per-character keys the bridge acts on. Anything else in a roster entry
 # (greeting, description, voice_ids, meta, ...) is passed through untouched — it
 # belongs to the mod, not to us.
-_CHARACTER_OVERRIDE_KEYS = ("model", "temperature", "max_tokens")
+_CHARACTER_OVERRIDE_KEYS = ("model", "stt_model", "temperature", "max_tokens")
 _MAX_TEMPERATURE = 2.0
 
 
@@ -107,6 +125,12 @@ def _normalize_character(entry: dict) -> dict:
         normalized.pop("model", None)
     else:
         normalized["model"] = model.strip()
+
+    stt_model = normalized.get("stt_model")
+    if not isinstance(stt_model, str) or not stt_model.strip():
+        normalized.pop("stt_model", None)
+    else:
+        normalized["stt_model"] = stt_model.strip()
 
     temperature = normalized.get("temperature")
     if isinstance(temperature, bool) or not isinstance(temperature, (int, float)):

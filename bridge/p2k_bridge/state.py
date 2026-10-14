@@ -16,6 +16,11 @@ _COUNTER_NAMES = (
     "rate_limited",
     "bytes_up",
     "bytes_down",
+    "stt_requests",
+    "stt_ok",
+    "stt_no_speech",
+    "stt_failed",
+    "stt_rate_limited",
 )
 
 JOURNAL_MAXLEN = 100

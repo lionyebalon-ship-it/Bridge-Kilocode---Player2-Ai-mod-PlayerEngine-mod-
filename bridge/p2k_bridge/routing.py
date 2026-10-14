@@ -83,7 +83,7 @@ _MIN_DESCRIPTION_LENGTH = 20
 
 # These are the keys honoured on a roster entry. Anything else in a character
 # dict is the roster's own business (greeting, description, voice_ids, meta).
-OVERRIDE_KEYS = ("model", "temperature", "max_tokens")
+OVERRIDE_KEYS = ("model", "stt_model", "temperature", "max_tokens")
 
 
 @dataclass
@@ -93,6 +93,7 @@ class Route:
     kind: str = UNKNOWN
     character_id: str = ""
     model: str = ""
+    stt_model: str = ""
     temperature: float = 0.0
     max_tokens: int = 0
     context_limit: int = 0
@@ -286,6 +287,10 @@ def character_overrides(character: Optional[dict]) -> dict:
     if model:
         overrides["model"] = model
 
+    stt_model = _text_field(character, "stt_model")
+    if stt_model:
+        overrides["stt_model"] = stt_model
+
     temperature = _clean_temperature(character.get("temperature"))
     if temperature is not None:
         overrides["temperature"] = temperature
@@ -316,6 +321,7 @@ def resolve_route(
 
     character_id = _text_field(character, "id") if character else ""
     model = overrides.get("model") or getattr(cfg, "model", "") or ""
+    stt_model = overrides.get("stt_model") or getattr(cfg, "stt_model", "") or ""
     temperature = overrides.get("temperature")
     if temperature is None:
         temperature = _clean_temperature(getattr(cfg, "temperature", None))
@@ -339,6 +345,7 @@ def resolve_route(
         kind=kind,
         character_id=character_id,
         model=model,
+        stt_model=stt_model,
         temperature=float(temperature),
         max_tokens=int(max_tokens),
         context_limit=int(context_limit),

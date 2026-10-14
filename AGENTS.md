@@ -81,6 +81,21 @@ node scripts/test_bot_framing.js                    # assert the 3-level user_me
   bridge at startup, with no listener at all. `_BridgeServer.server_bind` now
   derives `server_name` straight from the bind address. Regression cover:
   `tests.test_coverage_gaps.ServerBindHostnameTests`.
+- **Speech-to-text.** `bridge/p2k_bridge/stt.py` is pure (parse/clean/extract —
+  no I/O), so its whole contract is unit-testable. The one endpoint is
+  `POST /v1/stt/transcribe` (`server.py::_handle_stt`), which a Simple Voice
+  Chat addon calls on the voice-chat packet thread. **It must never return
+  non-200**: bad input, quota, gateway failure and "no speech" all come back as
+  `{"text": ""}`, because an exception there would disrupt voice chat for every
+  player. `text` (not `transcript`) is the reply key because that is the first one
+  `STTUtils.extractTranscriptText` reads in the mod.
+  **No free STT model works today** — the two the catalog advertises either
+  report `audio_tokens: 0` (audio never ingested) or are at their daily cap — so
+  on a free key every utterance logs one WARNING and degrades to `{"text": ""}`.
+  Measured evidence in `docs/SETUP.md → Voice input`. The default
+  `mistralai/voxtral-small-24b-2507` is paid and needs a key.
+  Per-character `stt_model` overrides resolve through `routing.resolve_route`, so
+  voice routing reuses the chat routing rather than being a second config path.
 - **Chat evidence needs a file-backed bridge log.** `test_bridge.sh` and
   `run_order.sh` discover the bridge's stdout path through `/proc`, so start the
   bridge with a log file (`python3 bridge/run.py ... > bridge.log 2>&1`) or the
