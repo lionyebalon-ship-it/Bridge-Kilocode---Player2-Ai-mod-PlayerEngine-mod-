@@ -36,8 +36,11 @@ install_packages() { # install_packages <description> <pkg>...
   local what="$1"; shift
   if have_apt; then
     echo "  installing $what (root detected)..."
+    # The sandbox is often a fresh container with no package lists, so a bare
+    # `apt-get install` fails with "Unable to locate package". Update first.
+    apt-get update -qq >/tmp/p2k-bootstrap-apt.log 2>&1 || true
     if DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$@" \
-      >/tmp/p2k-bootstrap-apt.log 2>&1; then
+      >>/tmp/p2k-bootstrap-apt.log 2>&1; then
       echo "  INSTALL OK: $what"
       return 0
     fi

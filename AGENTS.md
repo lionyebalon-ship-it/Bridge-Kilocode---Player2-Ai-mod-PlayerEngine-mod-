@@ -31,6 +31,7 @@ bash scripts/mc_cmd.sh <command>                    # send a server console comm
 bash scripts/run_order.sh <user> "<msg>"            # drive one NPC order via the mineflayer bot
 node scripts/test_bot_framing.js                    # assert the 3-level user_message frame (no rig needed)
 node scripts/chat_path_probe.js <user> [seconds]   # prove a NORMAL chat message drives an NPC turn (rig up)
+node scripts/mcmti_format_probe.js <user> [seconds] # prove the mcmti chat shapes work, incl. its prefix (rig up)
 ```
 
 ## Architecture facts that change how you work

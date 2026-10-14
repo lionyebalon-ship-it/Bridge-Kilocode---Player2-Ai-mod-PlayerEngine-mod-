@@ -202,6 +202,31 @@ It is **client-side only**, so the server needs nothing — but every player who
 wants voice needs a modded client with those three jars and a Whisper model.
 Vanilla clients cannot use it.
 
+### Verified shapes, and one warning
+
+`scripts/mcmti_format_probe.js` drives exactly what mcmti emits and asserts the
+outcome. Results, on the rig:
+
+| What mcmti sends | Expected | Result |
+|---|---|---|
+| `⌈Speech Input⌋ Kilo, get me three oak logs` | NPC turn | ✅ |
+| `⌈Speech Input⌋ hey Kilo can you help me` | NPC turn | ✅ |
+| `⌈Speech Input⌋ does anybody know the way to the mines` | ignored by the gate | ✅ correctly ignored |
+| `Kilo, please say hello` (prefix cleared) | NPC turn | ✅ |
+
+So the mod's by-name gate is a **substring** match, not a prefix match — the name
+can appear anywhere in the message, and mcmti's default `prefix` does not break
+it. The third row is the useful one: without the companion name the message is
+correctly ignored, so voice cannot accidentally trigger NPCs that weren't named.
+
+**Run one companion for voice.** With two characters in the roster the
+companions talk to each other (`kind=npc_dialogue`), and that chatter was
+observed to **starve a player's turn**: a message with the companion name was
+queued but never got its own bridge call, because the NPC's turns were spent
+answering the other NPC. The same four messages worked perfectly with a single
+companion. For responsive voice, keep `bridge/characters.json` to one character;
+use multi-character rosters for demonstrating per-character models.
+
 ### Server-side voice (the other path)
 
 `POST /v1/stt/transcribe` exists for a server-side alternative that would work
