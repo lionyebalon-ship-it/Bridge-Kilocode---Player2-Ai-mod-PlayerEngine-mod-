@@ -158,6 +158,11 @@ to catch that.
 `/v1/stt/start|stop`, `/v1/tts/speak` (stubs), `/v1/joules` (always-granted
 balance, feeds the mod's own budget gate), `/v1/minecraft/schematics/search`
 (stub). Plus ops-only `GET /bridge/healthz`, `/bridge/stats` (plain HTTP, no auth).
+**Any unmatched path is logged at WARNING and counted in `unserved_requests`** —
+this is the only thing standing between us and another silent gap like
+`/v1/joules`. Audited on the rig: the counter stays at 0 during normal play, so
+the jar's other references (`/v1/embeddings`, `/v1/ai_profiles`, `/v1/games/`) are
+dormant, not missing. If it ever goes non-zero, that path is a real gap.
 
 ## Environment gotchas (this sandbox)
 

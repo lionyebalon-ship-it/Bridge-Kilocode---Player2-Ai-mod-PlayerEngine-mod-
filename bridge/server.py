@@ -792,7 +792,24 @@ class BridgeHandler(BaseHTTPRequestHandler):
         elif path == "/":
             self._send_json({"service": SERVICE_NAME, "docs": "docs/SETUP.md"})
         else:
-            self._send_json({"error": "not found"}, 404)
+            self._send_unserved("GET", path)
+
+    def _send_unserved(self, method: str, path: str) -> None:
+        """A path no route matched: log it, count it, reply exactly as before.
+
+        This exists because a silent 404 once cost two sessions: the mods asked
+        for an endpoint we did not serve (``/v1/joules``), degraded gracefully,
+        and nothing on our side said so. The reply body is unchanged -- only the
+        visibility is new -- so the mods behave exactly as they did before.
+        """
+        STATE.increment("unserved_requests")
+        LOG.warning(
+            "%s %s -> not served by this bridge (unserved total: %d)",
+            method,
+            path,
+            STATE.stats.get("unserved_requests", 0),
+        )
+        self._send_json({"error": "not found"}, 404)
 
     def _route_post(self, path: str, body: bytes) -> None:
         if path == "/v1/chat/completions":
@@ -853,7 +870,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if path == "/v1/tts/speak":
             self._send_json({})
             return
-        self._send_json({"error": "not found"}, 404)
+        self._send_unserved("POST", path)
 
     def _route(self, method: str) -> None:
         body = self._read_body()

@@ -128,6 +128,52 @@ The mods still believe they are talking to the Player2 platform. The bridge answ
 | POST `/v1/minecraft/schematics/search` | Stub returning `{"results": [], "schematicInfos": []}` (schematics disabled, logged) |
 | GET `/` | Service fingerprint |
 
+### Anything unserved is now visible
+
+Any path no route matches is logged at WARNING and counted, so a gap can never be
+silent again:
+
+```
+[WARNING] POST /v1/embeddings -> not served by this bridge (unserved total: 1)
+```
+
+`/bridge/stats` carries `unserved_requests` for the bridge's whole lifetime, so
+`0` is the "nothing is missing" signal and anything above it names a path to go
+and investigate. The 404 reply body is unchanged — the mods behave exactly as
+before, so this is observability only.
+
+This exists because a silent 404 once cost two sessions: the mods asked for
+`/v1/joules`, we did not serve it, and neither side said so.
+
+#### The audit result (measured, not assumed)
+
+Audited on the rig by driving the whole feature surface — companion spawn and
+greetings, typed and by-name chat, a build request, a memory probe, a no-name
+message, and a disconnect/reconnect — with `scripts/endpoint_audit_probe.js`.
+Result: **`unserved_requests` stayed at 0.** The mods requested nothing the bridge
+does not answer, memory extraction ran, and the only mod-side warnings were the
+by-name gate correctly declining to answer a message that named no nearby
+companion.
+
+So the endpoints referenced in the jar but not served (`/v1/embeddings`,
+`/v1/ai_profiles`, `/v1/games/`, and the base `/v1/minecraft/schematics/`) are
+**dormant in this configuration**, not a live gap. NPC memory works through
+`memory_extraction` on `/v1/chat/completions`; there is no separate embeddings
+round-trip. The only mod-side failures in the log were Mojang's Yggdrasil key
+fetcher, which is an offline-mode/sandbox-proxy matter unrelated to this bridge.
+
+The remaining **served-but-inert** endpoints are the ones worth knowing about,
+because they are reachable and do nothing:
+
+| Endpoint | State |
+|---|---|
+| `POST /v1/minecraft/schematics/search` | Returns empty. The build feature never engaged during the audit — a natural-language "build me a house" is answered by the LLM with a `get` command instead. Implementing it is a separate feature. |
+| `POST /v1/tts/speak` | No-op. The mods' own TTS path is broken mod-side; NPCs reply in text. |
+| `POST /v1/stt/start` / `/stop` | The mods' own STT protocol, unused — voice in comes from `mcmti` instead. |
+
+Re-run the audit after any mod update: the counter going non-zero is the signal
+that the mods now want something new.
+
 ### Tokens, requests, and the (disabled) token budget
 1. **`max_tokens` = 500,000 requested per call** (free reign). The pinned model's context window is 262,144 tokens, so the bridge clamps per request: `effective = min(500000, 262144 − input − 1024)`, floored at 256, never above `max_tokens`. 500k intentionally exceeds the model's context window — the clamp makes it safe. If a 500k+ *working* context is ever wanted, `nvidia/nemotron-3-ultra-550b-a55b:free` has a 1M context — pin it via the config's `model` and set `"model_context_limit": 1000000`.
 2. **Token budget per window: DISABLED** (`token_budget_per_window: 0`) — no request is ever denied on tokens. Usage is still *tracked*: `/bridge/stats` reports the `token_budget` object (`window_used`, `lifetime_prompt`, `lifetime_completion`, `lifetime_total`, `lifetime_denials`). To re-enable enforcement set a positive value (e.g. `5000000`): the bridge then reserves estimated input + effective output, forwards only if it fits, reconciles to Kilo's reported usage, and refunds failed calls.

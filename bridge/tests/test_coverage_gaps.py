@@ -891,5 +891,55 @@ class ServerBindHostnameTests(unittest.TestCase):
             srv.server_close()
 
 
+class UnservedEndpointTests(BridgeHarness):
+    """An unserved path must be visible, and must not change what the caller gets.
+
+    A silent 404 is what let the `/v1/joules` gap cost two sessions: the mods
+    asked for an endpoint we did not serve, degraded gracefully, and our side
+    logged nothing at all.
+    """
+
+    def setUp(self):
+        self.harness = BridgeHarness()
+        self.harness.setUp()
+
+    def tearDown(self):
+        self.harness.tearDown()
+
+    def test_unserved_post_is_logged_counted_and_unchanged(self):
+        self.harness.start_bridge()
+        before = self.harness.stats()["unserved_requests"]
+        with self.assertLogs("p2k.bridge", level="WARNING") as captured:
+            status, raw = self.harness.request("POST", "/v1/embeddings", {"input": "hi"})
+        self.assertEqual(status, 404)
+        self.assertEqual(json.loads(raw), {"error": "not found"})
+        self.assertEqual(self.harness.stats()["unserved_requests"] - before, 1)
+        self.assertTrue(
+            any("POST /v1/embeddings" in line for line in captured.output),
+            captured.output,
+        )
+
+    def test_unserved_get_is_logged_and_counted(self):
+        self.harness.start_bridge()
+        before = self.harness.stats()["unserved_requests"]
+        with self.assertLogs("p2k.bridge", level="WARNING"):
+            status, raw = self.harness.request("GET", "/v1/ai_profiles")
+        self.assertEqual(status, 404)
+        self.assertEqual(json.loads(raw), {"error": "not found"})
+        self.assertEqual(self.harness.stats()["unserved_requests"] - before, 1)
+
+    def test_served_paths_do_not_increment_the_counter(self):
+        self.harness.start_bridge()
+        before = self.harness.stats()["unserved_requests"]
+        self.harness.request("GET", "/v1/health")
+        self.harness.request("GET", "/v1/selected_characters")
+        self.harness.request("GET", "/bridge/stats")
+        self.assertEqual(self.harness.stats()["unserved_requests"], before)
+
+    def test_counter_appears_in_stats(self):
+        self.harness.start_bridge()
+        self.assertIn("unserved_requests", self.harness.stats())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -21,6 +21,7 @@ _COUNTER_NAMES = (
     "stt_no_speech",
     "stt_failed",
     "stt_rate_limited",
+    "unserved_requests",
 )
 
 JOURNAL_MAXLEN = 100
