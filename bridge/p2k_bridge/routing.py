@@ -100,6 +100,9 @@ class Route:
     max_completion_tokens: int = 0
     supports_temperature: bool = True
     overridden_fields: tuple = ()
+    # Semantic memory resolution. True means this character asked for memory
+    # when it is on globally; False means it opted out explicitly.
+    character_disables_memory: bool = False
 
     @property
     def label(self) -> str:
@@ -302,6 +305,22 @@ def character_overrides(character: Optional[dict]) -> dict:
     return overrides
 
 
+def memory_override(character: Any) -> Optional[bool]:
+    """True: memory on for this character. False: explicitly off. None: inherit."""
+    if not isinstance(character, dict) or "memory_enabled" not in character:
+        return None
+    value = character.get("memory_enabled")
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ("true", "yes", "1", "on"):
+            return True
+        if lowered in ("false", "no", "0", "off"):
+            return False
+    return None
+
+
 def resolve_route(
     messages: Any,
     characters: Any,
@@ -352,4 +371,5 @@ def resolve_route(
         max_completion_tokens=int(max_completion_tokens),
         supports_temperature=supports_temperature,
         overridden_fields=tuple(sorted(overrides.keys())),
+        character_disables_memory=(memory_override(character) is False),
     )

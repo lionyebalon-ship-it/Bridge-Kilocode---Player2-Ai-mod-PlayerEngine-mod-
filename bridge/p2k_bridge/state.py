@@ -22,6 +22,11 @@ _COUNTER_NAMES = (
     "stt_failed",
     "stt_rate_limited",
     "unserved_requests",
+    "memory_injected",
+    "memory_no_match",
+    "memory_shed",
+    "memory_failed",
+    "memory_stored",
 )
 
 JOURNAL_MAXLEN = 100

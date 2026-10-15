@@ -19,7 +19,10 @@ from p2k_bridge import stt
 from p2k_bridge.budget import TokenBudget
 from p2k_bridge.catalog import ModelCatalog
 from p2k_bridge.config import BridgeConfig
+from p2k_bridge.embeddings_client import EmbeddingClient
+from p2k_bridge.embeddings import render_block, top_k
 from p2k_bridge.kilo import KiloClient, KiloError
+from p2k_bridge.memorystore import MemoryStore
 from p2k_bridge.normalize import normalize_llm_content, set_model, to_openai_envelope
 from p2k_bridge.ratelimit import BACKGROUND_KINDS, TokenBucket
 from p2k_bridge.routing import UNKNOWN, character_overrides, resolve_route
@@ -88,6 +91,214 @@ def roster() -> list[dict]:
     """The live character roster (hot-reloaded from characters.json)."""
     chars = STATE.characters
     return [c for c in chars if isinstance(c, dict)]
+
+
+# --- semantic memory ---------------------------------------------------------
+# Off unless memory_enabled. The store is created lazily on first use so a clean
+# checkout never writes anything, and the embedding client is only built when it
+# is configured, so a missing provider is one warning rather than a per-turn
+# failure.
+
+MEMORY: Optional[Any] = None
+MEMORY_CLIENT: Optional[Any] = None
+_MEMORY_PENDING: dict[str, list[str]] = {}
+_MEMORY_WARNED: set[str] = set()
+_MEMORY_WARNED_LOCK = threading.Lock()
+
+
+def _chat_preview_user(messages: Any) -> str:
+    """The last user message's plain text, for embedding and previewing."""
+    if not isinstance(messages, list):
+        return ""
+    for message in reversed(messages):
+        if isinstance(message, dict) and message.get("role") == "user":
+            content = message.get("content")
+            if isinstance(content, str) and content.strip():
+                return content.strip()
+    return ""
+
+
+def _memory_enabled(route: Any) -> bool:
+    if CFG is None or not getattr(CFG, "memory_enabled", False):
+        return False
+    # A character can opt out of memory entirely.
+    if route is not None:
+        cid = getattr(route, "character_id", "") or ""
+        if cid and route.character_disables_memory:
+            return False
+    return True
+
+
+def _memory_scope(route: Any) -> str:
+    return (getattr(route, "character_id", "") or "").strip()
+
+
+def _kind_in(kinds: Any, kind: str) -> bool:
+    if not isinstance(kinds, (list, tuple)) or not kinds:
+        return False
+    return kind in [k for k in kinds if isinstance(k, str)]
+
+
+def _ensure_memory() -> bool:
+    """Create the store and client on first use. Returns False if unavailable."""
+    global MEMORY, MEMORY_CLIENT
+    if MEMORY is not None:
+        return True
+    if CFG is None:
+        return False
+    try:
+        MEMORY = MemoryStore(
+            CFG.memory_store_path,
+            max_per_character=CFG.memory_max_per_character,
+            max_age_days=CFG.memory_max_age_days,
+        )
+    except Exception as exc:  # sqlite3.Error, OSError
+        _memory_warn("store", f"memory store unavailable ({exc}); memory disabled")
+        return False
+    MEMORY_CLIENT = EmbeddingClient(
+        CFG.memory_embeddings_base_url,
+        CFG.memory_embeddings_api_key,
+        CFG.memory_embeddings_model,
+    )
+    if not MEMORY_CLIENT.configured:
+        _memory_warn(
+            "client",
+            "memory_embeddings_base_url/model not configured; memory disabled",
+        )
+        return False
+    LOG.info(
+        "memory enabled: store=%s model=%s top_k=%s min_score=%.2f",
+        CFG.memory_store_path,
+        CFG.memory_embeddings_model,
+        CFG.memory_top_k,
+        CFG.memory_min_score,
+    )
+    return True
+
+
+def _memory_warn(key: str, message: str) -> None:
+    """Warn once per key, so a misconfiguration is one line rather than per-turn."""
+    with _MEMORY_WARNED_LOCK:
+        if key in _MEMORY_WARNED:
+            return
+        _MEMORY_WARNED.add(key)
+    LOG.warning("%s", message)
+
+
+def _memory_inject(messages: list, route: Any) -> list:
+    """Add a block of relevant past memories to the prompt. Never mutates input.
+
+    Returns ``messages`` unchanged when memory is off, unconfigured, the quota is
+    short, or nothing scores above the threshold — so the chat path is
+    indistinguishable from today when memory is inactive.
+    """
+    if not _memory_enabled(route) or not _ensure_memory():
+        return messages
+    if not _kind_in(CFG.memory_embed_query_kinds, getattr(route, "kind", "")):
+        return messages
+
+    cid = _memory_scope(route)
+    if not cid:
+        return messages
+    text = _chat_preview_user(messages)
+    if not text:
+        return messages
+
+    # Quota-gated, and shed BEFORE the chat call it serves: a turn must not be
+    # paid for and then starved. A shed embedding costs nothing, because
+    # try_acquire only spends on success.
+    if BUCKET is None or not BUCKET.try_acquire(background=False):
+        STATE.increment("memory_shed")
+        return messages
+
+    vectors, reason = MEMORY_CLIENT.embed_safe(text)
+    if not vectors:
+        STATE.increment("memory_failed")
+        _memory_warn("embed", f"memory embedding failed ({reason}); recall degraded")
+        return messages
+
+    ranked = top_k(vectors[0], MEMORY.candidates(cid), k=CFG.memory_top_k,
+                   min_score=CFG.memory_min_score)
+    if not ranked:
+        STATE.increment("memory_no_match")
+        return messages
+
+    block = render_block([text for _score, text in ranked], CFG.memory_max_chars)
+    if not block:
+        return messages
+    STATE.increment("memory_injected")
+    LOG.info("memory injected %d item(s) for char=%s (best %.2f)", len(ranked), cid,
+             ranked[0][0])
+
+    # Additive and clearly delimited: a separate system message after the mod's
+    # own, so the mod's prompt structure is untouched and only the model's
+    # context changes.
+    out = list(messages)
+    out.append({
+        "role": "system",
+        "content": (
+            "Relevant things you remember from earlier conversations with this "
+            "player (use them if they help; ignore if not):\n" + block
+        ),
+    })
+    return out
+
+
+def _memory_store(messages: list, reply: str, route: Any) -> None:
+    """Queue an extracted memory for storage, batching to one request.
+
+    Called on ``memory_extraction`` kinds. Batching is the main cost lever: up to
+    ``memory_store_batch_size`` memories share one embedding request.
+
+    Note it returns before ``_ensure_memory`` when there is nothing to store, so
+    a disabled or unconfigured bridge never creates a store as a side effect.
+    """
+    if not _memory_enabled(route):
+        return
+    if not _kind_in(CFG.memory_store_kinds, getattr(route, "kind", "")):
+        return
+    cid = _memory_scope(route)
+    body = reply.strip() if isinstance(reply, str) else ""
+    if not cid or not body:
+        return
+
+    if not _ensure_memory():
+        return
+    pending = _MEMORY_PENDING.setdefault(cid, [])
+    if body not in pending:
+        pending.append(body)
+    # Flush now rather than waiting for a full batch. An earlier version only
+    # flushed at memory_store_batch_size, which for this feature's actual rate
+    # (roughly one extraction per several minutes) meant a memory could sit
+    # pending indefinitely and never be stored. Batching still helps when
+    # several items are already pending, but it must not become the gate.
+    _memory_flush(cid)
+
+
+def _memory_flush(cid: str) -> int:
+    """Embed and store everything pending for a character. Returns rows stored."""
+    pending = _MEMORY_PENDING.get(cid) or []
+    if not pending or MEMORY is None or MEMORY_CLIENT is None:
+        _MEMORY_PENDING.pop(cid, None)
+        return 0
+    if BUCKET is None or not BUCKET.try_acquire(background=True):
+        # Background work must not take a token a player's turn needs; leaving
+        # it pending means the next turn tries again.
+        STATE.increment("memory_shed")
+        return 0
+    vectors, reason = MEMORY_CLIENT.embed_safe(pending)
+    if not vectors or len(vectors) != len(pending):
+        STATE.increment("memory_failed")
+        _memory_warn("store", f"memory store embedding failed ({reason}); not stored")
+        return 0
+    stored = 0
+    for vector, text in zip(vectors, pending):
+        if MEMORY.add(cid, text, vector, source="extraction"):
+            stored += 1
+    _MEMORY_PENDING.pop(cid, None)
+    if stored:
+        LOG.info("memory stored %d item(s) for char=%s", stored, cid)
+    return stored
 
 
 def _is_background(route: Any) -> bool:
@@ -563,9 +774,15 @@ class BridgeHandler(BaseHTTPRequestHandler):
         try:
             if KILO is None:
                 raise KiloError("kilo client not initialized")
-            resp = KILO.chat_completion(messages, route)
+            # Memory injection happens after admission: it must not spend the
+            # turn's token on a recall that the turn is about to pay for anyway.
+            # _memory_inject re-checks quota itself and sheds before this point.
+            resp = KILO.chat_completion(_memory_inject(messages, route), route)
             content = resp["choices"][0]["message"]["content"]
             obj = normalize_llm_content(content)
+            # The memory-extraction calls carry the graph back to us; queue it
+            # for the store so later turns can recall it.
+            _memory_store(messages, content, route)
             usage = resp.get("usage") if isinstance(resp, dict) else None
             usage_total = usage.get("total_tokens") if usage else None
             if usage_total is not None:

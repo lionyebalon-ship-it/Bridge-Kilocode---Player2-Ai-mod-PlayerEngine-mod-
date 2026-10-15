@@ -5,3 +5,4 @@ tls/certs/
 *.log
 .venv/
 .DS_Store
+data/

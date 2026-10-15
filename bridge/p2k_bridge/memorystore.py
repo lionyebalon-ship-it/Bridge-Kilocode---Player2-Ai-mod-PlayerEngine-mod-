@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS memories (
   source TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_mem_char_ts ON memories(character_id, ts);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mem_char_text ON memories(character_id, text);
 """
 
 
@@ -101,6 +102,10 @@ class MemoryStore:
 
         A memory that cannot be stored is a memory that cannot be recalled, which
         is degraded, not broken — so the caller is told by the return value.
+
+        Identical text for the same character is skipped: the extraction prompt is
+        re-sent on turns where nothing changed, and storing those would fill the
+        store with duplicates and crowd out the memories that matter.
         """
         cid = character_id if isinstance(character_id, str) else ""
         body = text.strip() if isinstance(text, str) else ""
@@ -114,7 +119,8 @@ class MemoryStore:
         try:
             with self._conn:
                 self._conn.execute(
-                    "INSERT INTO memories (character_id, text, embedding, ts, source)"
+                    "INSERT OR IGNORE INTO memories"
+                    " (character_id, text, embedding, ts, source)"
                     " VALUES (?, ?, ?, ?, ?)",
                     (cid, body, blob, float(when), source or ""),
                 )

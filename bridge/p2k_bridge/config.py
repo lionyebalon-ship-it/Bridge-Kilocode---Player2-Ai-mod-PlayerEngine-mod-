@@ -24,6 +24,9 @@ DEFAULT_CHARACTER: dict[str, Any] = {
     "temperature": None,
     "max_tokens": 0,
     "stt_model": "",
+    # Semantic memory overrides. Empty inherits the global value.
+    "memory_enabled": None,
+    "memory_top_k": 0,
 }
 
 DEFAULT_CHARACTERS: list[dict] = [copy.deepcopy(DEFAULT_CHARACTER)]
@@ -64,6 +67,29 @@ class BridgeConfig:
     # burst, clamped to [1, requests_per_hour]. A burst only redistributes the
     # waiting -- the sustained rate, and therefore the ceiling, is unchanged.
     burst_capacity: int = 0
+    # --- semantic memory retrieval -------------------------------------------
+    # Off by default. When on, the bridge embeds each player utterance, keeps a
+    # per-character vector store, and injects the most relevant past memories
+    # into the prompt. Costs ~1 extra Kilo request per turn (quota-gated and
+    # shed-first), so it degrades recall rather than breaking a turn.
+    memory_enabled: bool = False
+    memory_store_path: str = "data/memory.sqlite3"
+    # Separate provider on purpose: Kilo's quota belongs to chat.
+    memory_embeddings_base_url: str = ""
+    memory_embeddings_api_key: str = ""
+    memory_embeddings_model: str = "@cf/baai/bge-base-en-v1.5"
+    memory_embeddings_api_key_env: str = "CF_API_TOKEN"
+    memory_embed_query_kinds: list[str] = field(default_factory=lambda: ["conversation"])
+    memory_store_kinds: list[str] = field(default_factory=lambda: ["memory_extraction"])
+    memory_store_batch_size: int = 8
+    memory_top_k: int = 5
+    memory_max_chars: int = 1200
+    memory_max_per_character: int = 500
+    memory_max_age_days: float = 14.0
+    # 0.70 comes from a measurement, not a guess: on bge-base the weakest genuine
+    # paraphrase scored 0.79 and the strongest unrelated sentence 0.56, with
+    # "mine some stone" (a real request, wrong domain) at 0.68 in between.
+    memory_min_score: float = 0.70
     characters: list[dict] = field(default_factory=lambda: [copy.deepcopy(DEFAULT_CHARACTER)])
 
     # Speech-to-text (voice input for NPCs). The endpoint is model-agnostic; the
@@ -277,6 +303,8 @@ def load_config(path: str | None = None) -> BridgeConfig:
     cfg = BridgeConfig(**kwargs)
 
     cfg.kilo_api_key = _resolve_api_key(cfg, config_path)
+    if cfg.memory_enabled:
+        cfg.memory_embeddings_api_key = resolve_memory_api_key(cfg, config_path)
     return cfg
 
 
@@ -316,6 +344,27 @@ def _resolve_api_key(cfg: BridgeConfig, config_path: Optional[str]) -> str:
         cfg.kilo_api_key,
         os.environ.get(env_name) or "",
         _dotenv_value(config_path, env_name) or "",
+    )
+    for candidate in candidates:
+        if not is_placeholder_key(candidate):
+            return candidate.strip()
+    return ""
+
+
+def resolve_memory_api_key(cfg: BridgeConfig, config_path: Optional[str]) -> str:
+    """Resolve the embeddings provider key, mirroring the Kilo-key precedence.
+
+    Same order as ``_resolve_api_key``: the JSON value, the environment variable
+    named by ``memory_embeddings_api_key_env``, then the ``.env`` files. Without
+    this the token in ``.env`` is unreachable, because the bridge reads ``.env``
+    only through that helper rather than populating ``os.environ`` at startup.
+    """
+    if cfg.memory_embeddings_api_key.strip():
+        return cfg.memory_embeddings_api_key.strip()
+    env_name = (cfg.memory_embeddings_api_key_env or "CF_API_TOKEN").strip() or "CF_API_TOKEN"
+    candidates = (
+        os.environ.get(env_name) or "",
+        _dotenv_value(Path(config_path) if config_path else None, env_name) or "",
     )
     for candidate in candidates:
         if not is_placeholder_key(candidate):

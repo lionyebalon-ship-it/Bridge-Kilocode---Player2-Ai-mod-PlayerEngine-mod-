@@ -10,20 +10,6 @@
       "meta": {
         "skin_url": ""
       }
-    },
-    {
-      "id": "blaze",
-      "name": "Blaze",
-      "short_name": "BLAZE",
-      "greeting": "Fire's burning, boss. I'm here.",
-      "description": "You are a fearless, aggressive NPC who speaks in short, punchy sentences.",
-      "voice_ids": [],
-      "meta": {
-        "skin_url": ""
-      },
-      "model": "nvidia/nemotron-3-ultra-550b-a55b:free",
-      "temperature": 0.9,
-      "max_tokens": 2048
     }
   ]
 }

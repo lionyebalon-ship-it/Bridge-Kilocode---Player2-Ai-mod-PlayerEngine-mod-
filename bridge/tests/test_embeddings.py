@@ -303,6 +303,19 @@ class MemoryStoreTests(unittest.TestCase):
         ranked = top_k([1.0, 0.0], self.store.candidates("kilo"), k=5)
         self.assertEqual(len(ranked), 2)
 
+    def test_identical_text_is_stored_once(self):
+        # The extraction prompt is re-sent on turns where nothing changed; a
+        # unique index on (character_id, text) keeps one row.
+        self.add("kilo", "the player likes oak", [1.0])
+        self.store.add("kilo", "the player likes oak", [0.5], source="test")
+        self.assertEqual(
+            [t for _v, t in self.store.candidates("kilo")], ["the player likes oak"])
+
+    def test_same_text_for_two_characters_is_kept_separately(self):
+        self.add("kilo", "the player likes oak", [1.0])
+        self.add("blaze", "the player likes oak", [1.0])
+        self.assertEqual(self.store.count(), 2)
+
     def test_store_survives_reopen(self):
         self.add("kilo", "persisted", [0.5, 0.5])
         self.store.close()
