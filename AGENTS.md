@@ -35,6 +35,7 @@ node scripts/mcmti_format_probe.js <user> [seconds] # prove the mcmti chat shape
 node scripts/byname_gate_probe.js <user> [seconds]  # pin down the by-name gate: case, word boundaries, name vs short_name (rig up)
 node scripts/multitarget_probe.js <user> [seconds] # who answers: one named bot vs both named (rig up)
 node scripts/prefix_shape_probe.js <user> [seconds] # does mcmti's prefix break the by-name gate? (rig up)
+node scripts/burst_probe.js <user> [seconds]      # drive 3 consecutive commands; proves the burst does not stall a turn (rig up)
 ```
 
 ## Architecture facts that change how you work

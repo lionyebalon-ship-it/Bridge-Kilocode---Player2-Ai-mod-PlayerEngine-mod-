@@ -19,7 +19,7 @@
   "temperature": 0.5,
   "request_timeout_seconds": 90,
   "requests_per_hour": 180,
-  "burst_capacity": 0,
+  "burst_capacity": 8,
   "token_budget_per_window": 0,
   "window_seconds": 3600,
   "game_key": "player2-ai-npc-minecraft",
@@ -31,7 +31,9 @@
       "greeting": "Hey there! I'm your companion on this server. What are we up to today?",
       "description": "You are a helpful, concise Minecraft companion AI agent.",
       "voice_ids": [],
-      "meta": {"skin_url": ""}
+      "meta": {
+        "skin_url": ""
+      }
     }
   ]
 }

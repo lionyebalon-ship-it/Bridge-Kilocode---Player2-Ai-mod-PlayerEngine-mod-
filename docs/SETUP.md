@@ -159,6 +159,15 @@ The mods still believe they are talking to the Player2 platform. The bridge answ
    meaningless — it would spend next year's quota today and then stall for hours,
    which is why it is clamped.
 
+   Measured on the rig with two companions and `burst_capacity: 8`
+   (`scripts/burst_probe.js`, three consecutive commands): **zero player-driven
+   calls were shed** — both `conversation` calls and both `command_feedback`
+   calls were admitted, and two of the three commands executed in-game
+   (`@get wooden_pickaxe 1`, `@get oak_log 2`). The only sheds were
+   `npc_dialogue`, i.e. the companions talking to each other, which is exactly
+   what the reserve is for. That is why `bridge/config.json` ships `8` rather
+   than the derived `3`.
+
    To raise the ceiling itself you need a paid Kilo key (the provider's limit,
    not the bridge's).
 
