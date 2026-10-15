@@ -189,5 +189,77 @@ class PriorityAdmissionTests(unittest.TestCase):
         self.assertFalse(bucket.try_acquire())
 
 
+class BurstCapacityTests(unittest.TestCase):
+    """Burst is decoupled from the rate, so a full NPC turn can run without stalling.
+
+    The sustained rate is what the gateway caps, so the burst only redistributes
+    the waiting: burst 3 at 180/hr (the historical behaviour) stalls halfway
+    through a 3-5 call turn, burst 10 does not.
+    """
+
+    def test_zero_or_unset_derives_from_the_rate(self):
+        # Backwards compatibility: 180/hr has always given a burst of 3.
+        for burst in (0, None, -5, "nonsense", 2.5):
+            bucket = TokenBucket(180, 2, burst)
+            self.assertEqual(bucket.capacity, 3.0, burst)
+
+    def test_explicit_burst_is_honoured_and_starts_full(self):
+        bucket = TokenBucket(180, 2, 10)
+        self.assertEqual(bucket.capacity, 10.0)
+        for _ in range(10):
+            self.assertTrue(bucket.try_acquire())
+        self.assertFalse(bucket.try_acquire())
+
+    def test_booleans_do_not_silently_mean_burst_one(self):
+        # True is an int in Python and would otherwise give capacity 1.
+        self.assertEqual(TokenBucket(180, 2, True).capacity, 3.0)
+        self.assertEqual(TokenBucket(180, 2, False).capacity, 3.0)
+
+    def test_burst_is_clamped_to_the_rate(self):
+        # A burst above the hourly budget would spend next year's quota today.
+        self.assertEqual(TokenBucket(180, 2, 1000).capacity, 180.0)
+        self.assertEqual(TokenBucket(180, 2, 10**9).capacity, 180.0)
+
+    def test_burst_is_clamped_up_to_one(self):
+        self.assertEqual(TokenBucket(180, 2, 1).capacity, 1.0)
+
+    def test_burst_does_not_change_the_refill_rate(self):
+        # The key invariant: burst redistributes waiting, it does not raise the
+        # sustained rate. Draining a large burst refills at the same pace.
+        bucket = TokenBucket(180, 2, 10)
+        for _ in range(10):
+            bucket.try_acquire()
+        self.assertFalse(bucket.try_acquire())
+        bucket._last_refill -= 20.0  # 20 seconds at 180/hr -> ~1 token
+        self.assertTrue(bucket.try_acquire())
+        self.assertFalse(bucket.try_acquire())
+
+    def test_burst_and_degenerate_rate(self):
+        # rate 0 means one request ever, regardless of burst: the clamp pins the
+        # capacity to 1 and the refill is zero.
+        bucket = TokenBucket(0, 2, 10)
+        self.assertEqual(bucket.capacity, 1.0)
+        self.assertTrue(bucket.try_acquire())
+        bucket._last_refill -= 100000.0  # even "an hour later"
+        self.assertFalse(bucket.try_acquire())
+
+    def test_reserve_still_applies_with_a_large_burst(self):
+        bucket = TokenBucket(180, 2, 10)
+        self.assertEqual(bucket.reserve, 2.0)
+        # Background may consume down to the reserve: from 10 tokens that is 8
+        # acquires (background needs >= reserve + 1, so it stops at 3 -> 2).
+        for _ in range(8):
+            self.assertTrue(bucket.try_acquire(background=True))
+        self.assertFalse(bucket.try_acquire(background=True))
+        # The remaining 2 tokens are exactly the reserved ones, for players.
+        self.assertTrue(bucket.try_acquire(background=False))
+        self.assertTrue(bucket.try_acquire(background=False))
+        self.assertFalse(bucket.try_acquire(background=False))
+
+    def test_property_exposes_capacity(self):
+        self.assertEqual(TokenBucket(3600).capacity, 60.0)
+        self.assertEqual(TokenBucket(3600, 2, 7).capacity, 7.0)
+
+
 if __name__ == "__main__":
     unittest.main()

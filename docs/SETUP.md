@@ -131,7 +131,37 @@ The mods still believe they are talking to the Player2 platform. The bridge answ
 ### Tokens, requests, and the (disabled) token budget
 1. **`max_tokens` = 500,000 requested per call** (free reign). The pinned model's context window is 262,144 tokens, so the bridge clamps per request: `effective = min(500000, 262144 − input − 1024)`, floored at 256, never above `max_tokens`. 500k intentionally exceeds the model's context window — the clamp makes it safe. If a 500k+ *working* context is ever wanted, `nvidia/nemotron-3-ultra-550b-a55b:free` has a 1M context — pin it via the config's `model` and set `"model_context_limit": 1000000`.
 2. **Token budget per window: DISABLED** (`token_budget_per_window: 0`) — no request is ever denied on tokens. Usage is still *tracked*: `/bridge/stats` reports the `token_budget` object (`window_used`, `lifetime_prompt`, `lifetime_completion`, `lifetime_total`, `lifetime_denials`). To re-enable enforcement set a positive value (e.g. `5000000`): the bridge then reserves estimated input + effective output, forwards only if it fits, reconciles to Kilo's reported usage, and refunds failed calls.
-3. **The only hard limiter: 180 requests/hour** (continuously refilling token bucket; Kilo caps free models at ~200 req/hr/IP). When the cap trips, chat requests get an all-empty envelope — the NPC silently idles — `rate_limited` climbs, and a WARNING is logged; the bucket frees one request every 20 s.
+3. **The only hard limiter: 180 requests/hour** — a token *bucket*. The bucket is
+   the whole story of the "waiting": it holds tokens, every bridge call spends one,
+   and it refills continuously at `rate ÷ 3600` per second (180/hr ≈ one every
+   20 s). When it is empty, the call is degraded to the idle envelope — the NPC
+   silently idles, `rate_limited` climbs, a WARNING is logged.
+
+   **`burst_capacity` is how many tokens the bucket can hold at once.** It used
+   to be derived from the rate as `rate / 60`, so 180/hr meant a burst of **3**
+   — which is why a single NPC turn (3-5 calls) used to stall halfway through and
+   the player waited ~20 s mid-command. It is now a separate knob:
+
+   ```json
+   "requests_per_hour": 180,
+   "burst_capacity": 0
+   ```
+
+   `0` means "derive from the rate" (the historical `rate / 60`), so a clean
+   checkout is unchanged. A positive value is the explicit burst, clamped to
+   `[1, requests_per_hour]`.
+
+   **What burst does and does not buy you.** Burst only redistributes the
+   *waiting*; it does not raise the ceiling. With the free tier's ~200 req/hr and
+   ~5 calls per NPC turn, the ceiling is roughly **one turn every 2-3 minutes no
+   matter what burst is set**. A burst of 10 makes *two* full turns run instantly
+   and then hits the same 20 s refill. A burst larger than the hourly rate is
+   meaningless — it would spend next year's quota today and then stall for hours,
+   which is why it is clamped.
+
+   To raise the ceiling itself you need a paid Kilo key (the provider's limit,
+   not the bridge's).
+
 
 Ops visibility: `GET /bridge/stats` embeds `token_budget` + `requests {limit_per_hour, available, refill_per_sec}` + `recent_requests` (the journal, newest-first, ≤20: `ts`, `status`, `duration_ms`, `prompt_tokens`, `completion_tokens`, `total_tokens`, `preview`).
 

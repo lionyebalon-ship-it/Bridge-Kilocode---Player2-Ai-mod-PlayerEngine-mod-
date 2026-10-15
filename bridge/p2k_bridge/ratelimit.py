@@ -36,10 +36,11 @@ DEFAULT_RESERVE = 2
 class TokenBucket:
     """Continuously refilling token bucket keyed to a requests-per-hour rate."""
 
-    def __init__(self, rate_per_hour: int, reserve_tokens: int = DEFAULT_RESERVE):
+    def __init__(self, rate_per_hour: int, reserve_tokens: int = DEFAULT_RESERVE,
+                 burst_capacity: int = 0):
         rate = rate_per_hour if isinstance(rate_per_hour, (int, float)) else 0
         self._rate_per_hour = float(rate) if rate > 0 else 0.0
-        self._capacity = max(1.0, self._rate_per_hour / 60.0)
+        self._capacity = self._compute_capacity(burst_capacity)
         self._tokens = self._capacity
         self._last_refill = time.monotonic()
         self._lock = threading.Lock()
@@ -47,6 +48,32 @@ class TokenBucket:
         # capacity of 1 (a rate under 60/hr) the reserve is 0, which reproduces
         # the old behaviour exactly.
         self._reserve = self._compute_reserve(reserve_tokens)
+
+    def _compute_capacity(self, burst_capacity: Any) -> float:
+        """Resolve the burst capacity.
+
+        ``0``/unset derives it from the rate as ``rate / 60``, which is what the
+        bridge has always done, so a clean checkout is unchanged. An explicit
+        value decouples the burst from the rate, so an NPC turn's 3-5 calls can
+        run without stalling halfway through.
+
+        The burst is clamped to ``[1, rate]``: a burst larger than the hourly
+        budget would spend next year's quota today and then stall for hours, and
+        a burst below 1 would deadlock the bridge. Booleans are rejected first --
+        ``True`` is an ``int`` in Python and would silently mean burst 1.
+        """
+        if isinstance(burst_capacity, bool):
+            requested = 0
+        elif isinstance(burst_capacity, int):
+            requested = burst_capacity
+        else:
+            requested = 0
+
+        if requested <= 0:
+            return max(1.0, self._rate_per_hour / 60.0)
+
+        ceiling = max(1, int(self._rate_per_hour))
+        return float(min(requested, ceiling))
 
     def _compute_reserve(self, reserve_tokens: Any) -> float:
         try:
@@ -61,6 +88,11 @@ class TokenBucket:
     @property
     def reserve(self) -> float:
         return self._reserve
+
+    @property
+    def capacity(self) -> float:
+        """Resolved burst capacity, so it is observable in tests and diagnostics."""
+        return self._capacity
 
     def _refill(self, now: float) -> None:
         elapsed = now - self._last_refill

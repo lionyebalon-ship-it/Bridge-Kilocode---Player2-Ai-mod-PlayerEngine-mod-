@@ -63,7 +63,8 @@ def init(
 ) -> BridgeConfig:
     global CFG, BUCKET, BUDGET, BUDGET_ENABLED, KILO, CONFIG_PATH, CATALOG
     CFG = cfg
-    BUCKET = TokenBucket(cfg.requests_per_hour, cfg.reserve_tokens_for_players)
+    BUCKET = TokenBucket(cfg.requests_per_hour, cfg.reserve_tokens_for_players,
+                         cfg.burst_capacity)
     BUDGET_ENABLED = getattr(cfg, "token_budget_per_window", 0) > 0
     # A budget built with tokens_per_window=0 is tracking-only: try_reserve is
     # never called on it, commit() still records window/lifetime usage.

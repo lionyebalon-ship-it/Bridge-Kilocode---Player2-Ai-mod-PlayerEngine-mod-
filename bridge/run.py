@@ -45,7 +45,19 @@ def configure_logging() -> None:
     logging.getLogger("p2k.access").setLevel(logging.WARNING)
 
 
-def run_check(config_path: Path) -> int:
+def _burst_text(cfg) -> str:
+    """Describe the burst next to the quota, since the two are no longer the same."""
+    bucket = server.BUCKET
+    if bucket is None:  # pragma: no cover - only before init()
+        return "?"
+    burst = bucket.capacity
+    rate = float(getattr(cfg, "requests_per_hour", 0) or 0)
+    if burst > 0 and abs(burst - max(1.0, rate / 60.0)) > 0.001:
+        # An explicit burst that differs from the derived default is worth calling
+        # out, so nobody mistakes it for the historical behaviour.
+        derived = max(1.0, rate / 60.0)
+        return f"{burst:g}, overridden (derived would be {derived:g})"
+    return f"{burst:g}"
     cfg = load_config(str(config_path))
     cfg.config_path = str(config_path.resolve())
     client = KiloClient(cfg)
@@ -132,7 +144,7 @@ def _banner(cfg, servers) -> None:
         f"  login shim : http://127.0.0.1:{cfg.local_login_port} [{state('login-shim')}]",
         f"  TLS        : https://0.0.0.0:{cfg.tls_port} (servername api.player2.game) [{state('tls')}]",
         f"  model      : {cfg.model}",
-        f"  quota      : {cfg.requests_per_hour} requests/hour (local token bucket)",
+        f"  quota      : {cfg.requests_per_hour} requests/hour (burst {_burst_text(cfg)})",
         f"  kilo key   : {'configured' if key_configured else 'not configured (free tier)'}",
     ]
     # The *served* roster (characters.json) is what routing actually sees, so the

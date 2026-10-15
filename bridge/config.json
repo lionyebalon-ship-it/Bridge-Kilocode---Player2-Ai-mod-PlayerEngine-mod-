@@ -19,6 +19,7 @@
   "temperature": 0.5,
   "request_timeout_seconds": 90,
   "requests_per_hour": 180,
+  "burst_capacity": 0,
   "token_budget_per_window": 0,
   "window_seconds": 3600,
   "game_key": "player2-ai-npc-minecraft",

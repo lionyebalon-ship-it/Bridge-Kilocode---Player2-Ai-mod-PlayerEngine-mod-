@@ -59,6 +59,11 @@ class BridgeConfig:
     # command_feedback, stt) may always use any remaining token. The total
     # requests-per-hour is unchanged; only who is shed changes. 0 disables it.
     reserve_tokens_for_players: int = 2
+    # Burst capacity, decoupled from the rate. 0 derives it from the rate as
+    # rate/60 (the historical behaviour); any positive value is the explicit
+    # burst, clamped to [1, requests_per_hour]. A burst only redistributes the
+    # waiting -- the sustained rate, and therefore the ceiling, is unchanged.
+    burst_capacity: int = 0
     characters: list[dict] = field(default_factory=lambda: [copy.deepcopy(DEFAULT_CHARACTER)])
 
     # Speech-to-text (voice input for NPCs). The endpoint is model-agnostic; the

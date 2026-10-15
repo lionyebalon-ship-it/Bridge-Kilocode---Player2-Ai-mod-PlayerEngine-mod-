@@ -331,6 +331,37 @@ class RoutingWiringTests(BridgeHarness):
         status, _ = self.post_chat({"messages": self._messages("Info: anything")})
         self.assertEqual(status, 200)
 
+    def test_burst_capacity_is_independent_of_the_rate(self):
+        self._write_roster([{"id": "kilo", "name": "Kilo", "short_name": "KILO"}])
+        # STATE counters are process-global and never reset, so compare deltas
+        # rather than absolutes or an earlier test's usage leaks in.
+        before = self.start_bridge(requests_per_hour=180, burst_capacity=10)
+        baseline = self.stats()
+        del before
+        self.assertEqual(server.BUCKET.capacity, 10.0)
+        # A full NPC turn is 3-5 calls; with a burst of 10 they must all be
+        # admitted, where the derived burst of 3 would have stalled halfway.
+        original = server.KILO._request
+        server.KILO._request = (
+            lambda method, path, payload: {"choices": [{"message": {"content": "{}"}}]}
+        )
+        self.addCleanup(lambda: setattr(server.KILO, "_request", original))
+        for i in range(5):
+            status, _ = self.post_chat({"messages": self._messages(f"hello {i}")})
+            self.assertEqual(status, 200, f"call {i}")
+        after = self.stats()
+        self.assertEqual(after["rate_limited"] - baseline["rate_limited"], 0)
+        self.assertEqual(after["chat_ok"] - baseline["chat_ok"], 5)
+
+    def test_default_burst_stays_derived_from_the_rate(self):
+        # 180/hr has always given a burst of 3; that must not change.
+        self.start_bridge(requests_per_hour=180)
+        self.assertEqual(server.BUCKET.capacity, 3.0)
+
+    def test_burst_is_clamped_to_the_rate(self):
+        self.start_bridge(requests_per_hour=180, burst_capacity=10000)
+        self.assertEqual(server.BUCKET.capacity, 180.0)
+
     def test_kilo_error_reply_still_carries_route(self):
         self.start_bridge(kilo_behavior={"status": 500, "body": b"upstream boom"})
         status, raw = self.post_chat({"messages": self._messages("hello")})

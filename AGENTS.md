@@ -57,14 +57,16 @@ node scripts/prefix_shape_probe.js <user> [seconds] # does mcmti's prefix break 
 - **Token budget is intentionally disabled** (`token_budget_per_window: 0` =
   tracking only). Positive values re-enable reserve→reconcile→refund. Don't
   change the default without being asked.
-- **Rate limiter quirk:** `TokenBucket(180)` has *burst capacity*
-  `max(1, rate/60) = 3` — "3 remaining this hour" right after startup is
-  correct behavior, not a bug. 180 req/hr is the only hard limiter (Kilo caps
-  free models at ~200 req/hr/IP). Practical consequence: a freshly started
-  bridge answers only **3** rapid chat calls before the 4th is degraded to the
-  idle envelope; it then refills one token per 20 s. One NPC turn is usually
-  several bridge calls (user message → command feedback → memory extraction), so
-  an NPC can appear to "ignore" a command for ~20 s right after a restart.
+- **Rate limiter quirk:** the request quota is a *token bucket*. Every chat call
+  spends one token; the bucket refills continuously at `rate ÷ 3600` per second
+  (so 180/hr ≈ one every 20 s). When it is empty the call is degraded to the idle
+  envelope and `rate_limited` climbs. `burst_capacity` (default `0` = derive from
+  the rate as `rate/60`, so 180/hr gives 3) is how many tokens the bucket can hold
+  at once, and is now **independent of the rate** — set it to ~8-10 so a full NPC
+  turn (3-5 calls) does not stall halfway through. It is clamped to
+  `[1, requests_per_hour]`, and **burst only redistributes the waiting, it does
+  not raise the ceiling**: the sustained rate is the gateway's cap, and on the
+  free tier that is ~200 req/hr regardless.
 - **...but companion chatter no longer starves players.** With two companions
   spawned, the 3-token burst used to be spent on a spawn greeting plus NPC-to-NPC
   exchanges, after which the player's command *and* its command feedback were
